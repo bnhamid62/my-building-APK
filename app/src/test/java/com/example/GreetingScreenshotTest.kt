@@ -2,6 +2,8 @@ package com.example
 
 import androidx.compose.ui.test.junit4.createComposeRule
 import androidx.compose.ui.test.onRoot
+import com.example.ui.localization.AppLanguage
+import com.example.ui.screens.LoginScreen
 import com.example.ui.theme.MyApplicationTheme
 import com.github.takahirom.roborazzi.RobolectricDeviceQualifiers
 import com.github.takahirom.roborazzi.captureRoboImage
@@ -14,15 +16,23 @@ import org.robolectric.annotation.GraphicsMode
 
 @RunWith(RobolectricTestRunner::class)
 @GraphicsMode(GraphicsMode.Mode.NATIVE)
-@Config(qualifiers = RobolectricDeviceQualifiers.Pixel8, sdk = [36])
+@Config(qualifiers = RobolectricDeviceQualifiers.Pixel8, sdk = [34])
 class GreetingScreenshotTest {
 
-  @get:Rule val composeTestRule = createComposeRule()
+    @get:Rule val composeTestRule = createComposeRule()
 
-  @Test
-  fun greeting_screenshot() {
-    composeTestRule.setContent { MyApplicationTheme { Greeting("Robolectric") } }
+    @Test
+    fun login_screen_screenshot() {
+        composeTestRule.setContent {
+            MyApplicationTheme {
+                LoginScreen(
+                    appLanguage = AppLanguage.FRENCH,
+                    onLoginSubmit = { _, _ -> true },
+                    onToggleLanguage = {}
+                )
+            }
+        }
 
-    composeTestRule.onRoot().captureRoboImage(filePath = "src/test/screenshots/greeting.png")
-  }
+        composeTestRule.onRoot().captureRoboImage(filePath = "src/test/screenshots/login_screen.png")
+    }
 }
