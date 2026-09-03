@@ -1,6 +1,8 @@
 package com.example.ui.screens
 
 import androidx.compose.foundation.background
+import androidx.compose.foundation.horizontalScroll
+import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
@@ -344,7 +346,9 @@ fun TransparencyTabContent(
 
                 // Floor filter buttons (All, Floor 0..9)
                 Row(
-                    modifier = Modifier.fillMaxWidth(),
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .horizontalScroll(rememberScrollState()),
                     horizontalArrangement = Arrangement.spacedBy(6.dp),
                     verticalAlignment = Alignment.CenterVertically
                 ) {
@@ -353,11 +357,11 @@ fun TransparencyTabContent(
                         onClick = { onFloorFilterChange(null) },
                         label = { Text(if (appLanguage == AppLanguage.ARABIC) "الكل" else "Tous", fontSize = 11.sp) }
                     )
-                    (0..4).forEach { floor ->
+                    (0..9).forEach { floor ->
                         FilterChip(
                             selected = selectedFloorFilter == floor,
                             onClick = { onFloorFilterChange(if (selectedFloorFilter == floor) null else floor) },
-                            label = { Text("Et.$floor", fontSize = 11.sp) }
+                            label = { Text(if (floor == 0) "RDC" else "Et.$floor", fontSize = 11.sp) }
                         )
                     }
                 }

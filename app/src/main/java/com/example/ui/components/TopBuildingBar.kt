@@ -72,7 +72,7 @@ fun TopBuildingBar(
                     )
                     Spacer(modifier = Modifier.width(6.dp))
                     Text(
-                        text = "(${if (isOffline) "Appuyer pour reconnecter" else "Simuler hors ligne"})",
+                        text = "(${if (isOffline) "Données en cache" else "Synchronisé"})",
                         fontSize = 11.sp,
                         color = MaterialTheme.colorScheme.onSurfaceVariant
                     )

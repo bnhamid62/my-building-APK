@@ -5,6 +5,7 @@ import androidx.lifecycle.ViewModelProvider
 import androidx.lifecycle.viewModelScope
 import com.example.data.ApartmentTransparencyItem
 import com.example.data.BuildingRepository
+import com.example.data.sync.SyncEngine
 import com.example.model.*
 import com.example.ui.localization.AppLanguage
 import com.example.ui.localization.AppThemeMode
@@ -15,6 +16,11 @@ import java.util.Date
 import java.util.Locale
 
 class BuildingViewModel(private val repository: BuildingRepository) : ViewModel() {
+
+    private val syncEngine = SyncEngine(repository.dao)
+
+    private val _authToken = MutableStateFlow<String?>("demo-token-amarati")
+    val authToken: StateFlow<String?> = _authToken.asStateFlow()
 
     private val _currentUser = MutableStateFlow<User?>(null)
     val currentUser: StateFlow<User?> = _currentUser.asStateFlow()
@@ -97,7 +103,14 @@ class BuildingViewModel(private val repository: BuildingRepository) : ViewModel(
         _isOffline.value = !_isOffline.value
         if (!_isOffline.value) {
             _lastSyncTime.value = SimpleDateFormat("HH:mm - dd/MM/yyyy", Locale.getDefault()).format(Date())
-            _snackMessage.value = if (_appLanguage.value == AppLanguage.ARABIC) "تم الاتصال وتحديث البيانات بنجاح" else "Connexion rétablie, données synchronisées"
+            viewModelScope.launch {
+                val syncRes = syncEngine.syncPendingOperations(_authToken.value)
+                refreshTransparency()
+                _snackMessage.value = if (_appLanguage.value == AppLanguage.ARABIC) 
+                    "تم الاتصال: ${syncRes.message}" 
+                else 
+                    "En ligne : ${syncRes.message}"
+            }
         } else {
             _snackMessage.value = if (_appLanguage.value == AppLanguage.ARABIC) "وضع عدم الاتصال نشط" else "Mode hors ligne actif"
         }
@@ -282,7 +295,10 @@ class BuildingViewModel(private val repository: BuildingRepository) : ViewModel(
     fun reportProblem(category: MaintenanceCategory, description: String, photoUri: String?) {
         val user = _currentUser.value ?: return
         viewModelScope.launch {
-            val result = repository.createMaintenanceReport(user.apartmentNumber, user, category, description, photoUri)
+            val result = repository.createMaintenanceReport(
+                user.apartmentNumber, user, category, description, photoUri,
+                isOffline = _isOffline.value
+            )
             result.onSuccess { repId ->
                 _snackMessage.value = if (_appLanguage.value == AppLanguage.ARABIC)
                     "تم إرسال بلاغ العطل ($repId) إلى الوكيلين."

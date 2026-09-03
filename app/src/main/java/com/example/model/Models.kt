@@ -121,7 +121,8 @@ data class MaintenanceReport(
     val status: MaintenanceStatus = MaintenanceStatus.NEW,
     val syndicNotes: String? = null,
     val createdAt: Long = System.currentTimeMillis(),
-    val updatedAt: Long = System.currentTimeMillis()
+    val updatedAt: Long = System.currentTimeMillis(),
+    val isPendingSync: Boolean = false
 )
 
 data class ElevatorRecord(

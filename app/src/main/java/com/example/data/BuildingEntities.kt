@@ -80,7 +80,8 @@ data class MaintenanceEntity(
     val status: String,
     val syndicNotes: String?,
     val createdAt: Long,
-    val updatedAt: Long
+    val updatedAt: Long,
+    val isPendingSync: Boolean = false
 )
 
 @Entity(tableName = "elevator_records")

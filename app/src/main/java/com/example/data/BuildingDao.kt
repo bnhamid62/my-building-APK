@@ -61,6 +61,12 @@ interface BuildingDao {
     @Query("SELECT * FROM financial_ledger WHERE status = 'PENDING_APPROVAL' ORDER BY createdAt DESC")
     fun getPendingApprovalLedgerFlow(): Flow<List<LedgerEntity>>
 
+    @Query("SELECT * FROM financial_ledger WHERE isPendingSync = 1")
+    suspend fun getPendingSyncLedgerEntries(): List<LedgerEntity>
+
+    @Query("SELECT * FROM maintenance_reports WHERE isPendingSync = 1")
+    suspend fun getPendingSyncMaintenanceReports(): List<MaintenanceEntity>
+
     @Query("SELECT * FROM financial_ledger WHERE apartmentNumber = :aptNumber AND status = 'LOCKED' ORDER BY createdAt DESC")
     fun getLedgerForApartmentFlow(aptNumber: Int): Flow<List<LedgerEntity>>
 

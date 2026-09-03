@@ -10,7 +10,7 @@ import java.util.Date
 import java.util.Locale
 import java.util.UUID
 
-class BuildingRepository(private val dao: BuildingDao) {
+class BuildingRepository(val dao: BuildingDao) {
 
     suspend fun initializeSeedDataIfNeeded() {
         val existingUsers = dao.getAllUsers()
@@ -779,7 +779,8 @@ class BuildingRepository(private val dao: BuildingDao) {
         user: User,
         category: MaintenanceCategory,
         description: String,
-        photoUri: String?
+        photoUri: String?,
+        isOffline: Boolean = false
     ): Result<String> {
         val year = SimpleDateFormat("yyyy", Locale.US).format(Date())
         val randomSuffix = String.format(Locale.US, "%05d", (1000..9999).random())
@@ -796,7 +797,8 @@ class BuildingRepository(private val dao: BuildingDao) {
             status = "NEW",
             syndicNotes = null,
             createdAt = System.currentTimeMillis(),
-            updatedAt = System.currentTimeMillis()
+            updatedAt = System.currentTimeMillis(),
+            isPendingSync = isOffline
         )
         dao.insertMaintenance(entity)
 
@@ -1094,7 +1096,8 @@ fun MaintenanceEntity.toMaintenanceReport() = MaintenanceReport(
     status = MaintenanceStatus.valueOf(status),
     syndicNotes = syndicNotes,
     createdAt = createdAt,
-    updatedAt = updatedAt
+    updatedAt = updatedAt,
+    isPendingSync = isPendingSync
 )
 
 fun ElevatorEntity.toElevatorRecord() = ElevatorRecord(
