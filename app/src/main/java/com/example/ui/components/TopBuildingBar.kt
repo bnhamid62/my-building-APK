@@ -158,8 +158,8 @@ fun TopBuildingBar(
                 }
             }
 
-            // Syndic Mode Switch Banner (Only for the 2 Syndics!)
-            if (currentUser?.role == UserRole.OWNER_SYNDIC) {
+            // Syndic Mode Switch Banner (Only for the Single Syndic)
+            if (currentUser?.role == UserRole.SYNDIC) {
                 Surface(
                     color = if (isSyndicMode) SandAmber.copy(alpha = 0.15f) else MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.4f),
                     modifier = Modifier.fillMaxWidth()

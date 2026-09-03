@@ -241,18 +241,15 @@ class MainActivity : ComponentActivity() {
                                 val announcements by viewModel.announcements.collectAsState()
                                 val maintenanceReports by viewModel.maintenanceReports.collectAsState()
                                 val votingSessions by viewModel.votingSessions.collectAsState()
-                                val pendingLedger by viewModel.pendingLedger.collectAsState()
                                 val lockedLedger by viewModel.lockedLedger.collectAsState()
 
-                                if (isSyndicMode && user.role == UserRole.OWNER_SYNDIC) {
-                                    // Dedicated Syndic Management Screen
+                                if (isSyndicMode && user.role == UserRole.SYNDIC) {
+                                    // Dedicated Single-Syndic Management Screen
                                     SyndicManagementScreen(
                                         user = user,
                                         appLanguage = appLanguage,
                                         projects = projects,
-                                        pendingLedger = pendingLedger,
                                         lockedLedger = lockedLedger,
-                                        onApproveProject = { id, app, r -> viewModel.approveProject(id, app, r) },
                                         onCreateProject = { t, d, c -> viewModel.createProject(t, d, c) },
                                         onRecordPayment = { pId, pTitle, apt, oId, oName, amt, meth ->
                                             viewModel.recordOwnerPayment(pId, pTitle, apt, oId, oName, amt, meth)
@@ -260,9 +257,9 @@ class MainActivity : ComponentActivity() {
                                         onCreateExpense = { pId, pT, cat, desc, amt, sup, inv, meth ->
                                             viewModel.createExpense(pId, pT, cat, desc, amt, sup, inv, meth)
                                         },
-                                        onApproveExpense = { txId, app, r -> viewModel.approveExpense(txId, app, r) },
-                                        onRequestCorrection = { orig, newAmt, r -> viewModel.requestFinancialCorrection(orig, newAmt, r) },
-                                        onApproveCorrection = { corrId, app, r -> viewModel.approveCorrection(corrId, app, r) },
+                                        onRecordCorrection = { orig, delta, isDebit, r ->
+                                            viewModel.recordFinancialCorrection(orig, delta, isDebit, r)
+                                        },
                                         onPublishAnnouncement = { t, c, cat -> viewModel.publishAnnouncement(t, c, cat) },
                                         onScheduleMeeting = { t, d, l, desc, ag -> viewModel.createMeeting(t, d, l, desc, ag) }
                                     )

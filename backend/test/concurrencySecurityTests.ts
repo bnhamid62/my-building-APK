@@ -1,8 +1,10 @@
 import { createApp } from '../src/index';
+import { initDatabase, query } from '../src/db';
 import http from 'http';
 
 async function runConcurrencyAndSecurityTests() {
-  console.log('=== RUNNING CONCURRENCY, ATTACK & SECURITY VERIFICATION SUITE ===\n');
+  console.log('=== RUNNING AMARATI CONCURRENCY, ATTACK & SECURITY VERIFICATION SUITE ===\n');
+  await initDatabase();
   const app = createApp();
   const server = http.createServer(app);
 
@@ -24,20 +26,13 @@ async function runConcurrencyAndSecurityTests() {
     }
 
     try {
-      // 1. Authenticate actors
-      const res1 = await fetch(`${baseUrl}/api/v1/auth/login`, {
+      // 1. Authenticate Single Syndic and Regular Owner
+      const resSyndic = await fetch(`${baseUrl}/api/v1/auth/login`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ username: 'apt1', password: 'amarati123' })
       });
-      const syndic1 = await res1.json() as any;
-
-      const res2 = await fetch(`${baseUrl}/api/v1/auth/login`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ username: 'apt2', password: 'amarati123' })
-      });
-      const syndic2 = await res2.json() as any;
+      const syndic = await resSyndic.json() as any;
 
       const resOwner = await fetch(`${baseUrl}/api/v1/auth/login`, {
         method: 'POST',
@@ -60,7 +55,7 @@ async function runConcurrencyAndSecurityTests() {
         if (res.status !== 401) throw new Error(`Expected 401, got ${res.status}`);
       });
 
-      // ATTACK TEST 3: Privilege Escalation Attempt (Regular Owner attempts to create project)
+      // ATTACK TEST 3: Privilege Escalation Attempt (Regular Owner attempts Syndic operations)
       await test('Security: Regular owner cannot create project (403 Forbidden)', async () => {
         const res = await fetch(`${baseUrl}/api/v1/projects`, {
           method: 'POST',
@@ -77,8 +72,25 @@ async function runConcurrencyAndSecurityTests() {
         if (res.status !== 403) throw new Error(`Expected 403, got ${res.status}`);
       });
 
+      await test('Security: Regular owner cannot record payment (403 Forbidden)', async () => {
+        const res = await fetch(`${baseUrl}/api/v1/ledger/payments`, {
+          method: 'POST',
+          headers: { 
+            Authorization: `Bearer ${owner.token}`,
+            'Content-Type': 'application/json'
+          },
+          body: JSON.stringify({
+            apartment_number: 5,
+            project_id: 'PRJ-2026-001',
+            amount: 5000,
+            payment_method: 'CASH'
+          })
+        });
+        if (res.status !== 403) throw new Error(`Expected 403, got ${res.status}`);
+      });
+
       // ATTACK TEST 4: Direct SQL Injection in Login
-      await test('Security: SQL injection payload rejected safely', async () => {
+      await test('Security: SQL injection payload safely rejected', async () => {
         const res = await fetch(`${baseUrl}/api/v1/auth/login`, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
@@ -87,46 +99,13 @@ async function runConcurrencyAndSecurityTests() {
         if (res.status !== 401) throw new Error(`Expected 401, got ${res.status}`);
       });
 
-      // CONCURRENCY TEST 1: Simultaneous Project Approvals
-      // Create project by Syndic 1
-      const pRes = await fetch(`${baseUrl}/api/v1/projects`, {
-        method: 'POST',
-        headers: { 
-          Authorization: `Bearer ${syndic1.token}`,
-          'Content-Type': 'application/json'
-        },
-        body: JSON.stringify({
-          title: 'Sécurité Incendie - Extincteurs',
-          description: 'Achat de 10 extincteurs aux normes',
-          total_cost: 80000
-        })
-      });
-      const prj = await pRes.json() as any;
-
-      await test('Concurrency: Simultaneous approvals handled safely', async () => {
-        const [req1, req2] = await Promise.all([
-          fetch(`${baseUrl}/api/v1/projects/${prj.id}/approve`, {
-            method: 'POST',
-            headers: { Authorization: `Bearer ${syndic2.token}` }
-          }),
-          fetch(`${baseUrl}/api/v1/projects/${prj.id}/approve`, {
-            method: 'POST',
-            headers: { Authorization: `Bearer ${syndic2.token}` }
-          })
-        ]);
-
-        const statuses = [req1.status, req2.status];
-        if (!statuses.includes(200)) throw new Error('At least one approval must succeed with 200');
-        // The other should either be 200 or 400 (already approved)
-      });
-
-      // CONCURRENCY TEST 2: Concurrent identical payments deduplicated via Idempotency
-      await test('Concurrency: Race condition on identical payments deduplicated by server', async () => {
-        const raceKey = `race-pay-key-${Date.now()}`;
+      // CONCURRENCY TEST 1: Concurrent identical payments deduplicated via Permanent Idempotency
+      await test('Concurrency: Race condition on identical payment requests deduplicated by server', async () => {
+        const raceKey = 'c0a80101-0000-0000-0000-' + Date.now().toString(16).padStart(12, '0');
         const payPayload = {
           apartment_number: 15,
-          project_id: prj.id,
-          amount: 2000,
+          project_id: 'PRJ-2026-001',
+          amount: 10000,
           payment_method: 'CASH',
           idempotency_key: raceKey
         };
@@ -135,7 +114,7 @@ async function runConcurrencyAndSecurityTests() {
           fetch(`${baseUrl}/api/v1/ledger/payments`, {
             method: 'POST',
             headers: { 
-              Authorization: `Bearer ${syndic1.token}`,
+              Authorization: `Bearer ${syndic.token}`,
               'Content-Type': 'application/json'
             },
             body: JSON.stringify(payPayload)
@@ -143,7 +122,7 @@ async function runConcurrencyAndSecurityTests() {
           fetch(`${baseUrl}/api/v1/ledger/payments`, {
             method: 'POST',
             headers: { 
-              Authorization: `Bearer ${syndic1.token}`,
+              Authorization: `Bearer ${syndic.token}`,
               'Content-Type': 'application/json'
             },
             body: JSON.stringify(payPayload)
@@ -153,8 +132,77 @@ async function runConcurrencyAndSecurityTests() {
         const data1 = await p1.json() as any;
         const data2 = await p2.json() as any;
 
-        if (data1.tx_id !== data2.tx_id) {
-          throw new Error(`Race condition failed idempotency: ${data1.tx_id} vs ${data2.tx_id}`);
+        const seq1 = data1.transaction?.tx_seq_id;
+        const seq2 = data2.transaction?.tx_seq_id;
+
+        if (!seq1 || !seq2 || seq1 !== seq2) {
+          throw new Error(`Race condition failed deduplication: ${seq1} vs ${seq2}`);
+        }
+
+        // Verify that only 1 record exists with this idempotency key in DB
+        const countRes = await query('SELECT COUNT(*) as count FROM financial_transactions WHERE idempotency_key = $1', [raceKey]);
+        if (Number(countRes.rows[0].count) !== 1) {
+          throw new Error(`Expected 1 transaction in DB, found ${countRes.rows[0].count}`);
+        }
+      });
+
+      // CONCURRENCY TEST 2: Multiple concurrent payments for different apartments serialized correctly
+      await test('Concurrency: Multiple simultaneous payments for distinct apartments serialize monotonically', async () => {
+        const promises = [16, 17, 18, 19].map(apt => {
+          return fetch(`${baseUrl}/api/v1/ledger/payments`, {
+            method: 'POST',
+            headers: { 
+              Authorization: `Bearer ${syndic.token}`,
+              'Content-Type': 'application/json'
+            },
+            body: JSON.stringify({
+              apartment_number: apt,
+              project_id: 'PRJ-2026-001',
+              amount: 10000,
+              payment_method: 'BANK_TRANSFER',
+              idempotency_key: `00000000-0000-0000-0000-${String(apt).padStart(12, '0')}`
+            })
+          });
+        });
+
+        const responses = await Promise.all(promises);
+        for (const r of responses) {
+          if (r.status !== 201) throw new Error(`Concurrent payment returned status ${r.status}`);
+        }
+
+        const datas = await Promise.all(responses.map(r => r.json())) as any[];
+        const txSeqs = datas.map(d => d.transaction.tx_seq_id);
+        const uniqueSeqs = new Set(txSeqs);
+
+        if (uniqueSeqs.size !== 4) {
+          throw new Error('Concurrent payments must receive distinct sequential TX IDs');
+        }
+      });
+
+      // CONCURRENCY TEST 3: Concurrent voting attempts for the same apartment safely handled
+      await test('Concurrency: Simultaneous votes for same apartment rejected with 409 Conflict', async () => {
+        const [v1, v2] = await Promise.all([
+          fetch(`${baseUrl}/api/v1/voting/VOTE-001/vote`, {
+            method: 'POST',
+            headers: { 
+              Authorization: `Bearer ${owner.token}`,
+              'Content-Type': 'application/json'
+            },
+            body: JSON.stringify({ choice: 'YES' })
+          }),
+          fetch(`${baseUrl}/api/v1/voting/VOTE-001/vote`, {
+            method: 'POST',
+            headers: { 
+              Authorization: `Bearer ${owner.token}`,
+              'Content-Type': 'application/json'
+            },
+            body: JSON.stringify({ choice: 'NO' })
+          })
+        ]);
+
+        const statuses = [v1.status, v2.status];
+        if (!statuses.includes(201) || !statuses.includes(409)) {
+          throw new Error(`Expected exactly one 201 and one 409, got ${statuses.join(', ')}`);
         }
       });
 
@@ -166,4 +214,7 @@ async function runConcurrencyAndSecurityTests() {
   });
 }
 
-runConcurrencyAndSecurityTests();
+runConcurrencyAndSecurityTests().catch(err => {
+  console.error('Test error:', err);
+  process.exit(1);
+});

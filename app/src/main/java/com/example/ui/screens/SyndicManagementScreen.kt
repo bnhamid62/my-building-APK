@@ -4,16 +4,13 @@ import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
-import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
-import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.*
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
@@ -31,29 +28,15 @@ fun SyndicManagementScreen(
     user: User,
     appLanguage: AppLanguage,
     projects: List<Project>,
-    pendingLedger: List<FinancialLedgerEntry>,
     lockedLedger: List<FinancialLedgerEntry>,
-    onApproveProject: (String, Boolean, String?) -> Unit,
     onCreateProject: (String, String, Long) -> Unit,
     onRecordPayment: (String, String, Int, Long, String, Long, PaymentMethod) -> Unit,
     onCreateExpense: (String?, String?, String, String, Long, String, String, PaymentMethod) -> Unit,
-    onApproveExpense: (String, Boolean, String?) -> Unit,
-    onRequestCorrection: (String, Long, String) -> Unit,
-    onApproveCorrection: (String, Boolean, String?) -> Unit,
+    onRecordCorrection: (String, Long, Boolean, String) -> Unit,
     onPublishAnnouncement: (String, String, AnnouncementCategory) -> Unit,
     onScheduleMeeting: (String, Long, String, String, String) -> Unit
 ) {
     var activeDialog by remember { mutableStateOf<String?>(null) }
-
-    val pendingProjects = projects.filter { it.status == ProjectStatus.PENDING_APPROVAL }
-    val pendingExpenses = pendingLedger.filter { it.type == TransactionType.EXPENSE && it.status == TransactionStatus.PENDING_APPROVAL }
-    val pendingCorrections = pendingLedger.filter {
-        (it.type == TransactionType.CORRECTION_CREDIT || it.type == TransactionType.CORRECTION_DEBIT) &&
-                it.status == TransactionStatus.PENDING_APPROVAL
-    }
-    val totalPendingCount = pendingProjects.size + pendingExpenses.size + pendingCorrections.size
-
-    val otherSyndicName = if (user.id == 1L) "Karim Mansouri (Syndic 2)" else "Ahmed Benali (Syndic 1)"
 
     LazyColumn(
         modifier = Modifier
@@ -62,26 +45,26 @@ fun SyndicManagementScreen(
             .padding(16.dp),
         verticalArrangement = Arrangement.spacedBy(16.dp)
     ) {
-        // Management Banner
+        // Management Banner (Single-Syndic Authoritative Model)
         item {
             Card(
                 shape = RoundedCornerShape(16.dp),
-                colors = CardDefaults.cardColors(containerColor = SandAmber.copy(alpha = 0.15f)),
+                colors = CardDefaults.cardColors(containerColor = AtlasEmerald.copy(alpha = 0.12f)),
                 modifier = Modifier.fillMaxWidth()
             ) {
                 Column(modifier = Modifier.padding(16.dp)) {
                     Row(verticalAlignment = Alignment.CenterVertically) {
-                        Icon(Icons.Default.AdminPanelSettings, contentDescription = null, tint = SandAmber, modifier = Modifier.size(28.dp))
+                        Icon(Icons.Default.AdminPanelSettings, contentDescription = null, tint = AtlasEmerald, modifier = Modifier.size(28.dp))
                         Spacer(modifier = Modifier.width(10.dp))
                         Column {
                             Text(
                                 text = Strings.buildingManagement(appLanguage),
                                 style = MaterialTheme.typography.titleMedium,
                                 fontWeight = FontWeight.Bold,
-                                color = SandAmber
+                                color = AtlasEmerald
                             )
                             Text(
-                                text = "Connecté en tant que ${user.fullName} • Co-Syndic: $otherSyndicName",
+                                text = "${user.fullName} • Syndic Unique (Apt ${user.apartmentNumber})",
                                 style = MaterialTheme.typography.bodySmall,
                                 color = MaterialTheme.colorScheme.onSurfaceVariant
                             )
@@ -91,7 +74,10 @@ fun SyndicManagementScreen(
                     Spacer(modifier = Modifier.height(10.dp))
 
                     Text(
-                        text = "Rappel règles de gestion : Les paiements propriétaires sont verrouillés immédiatement. Les projets, dépenses et corrections nécessitent obligatoirement l'approbation du 2ème syndic sans auto-approbation.",
+                        text = if (appLanguage == AppLanguage.ARABIC)
+                            "النموذج المالي المعتمد: وكيل واحد مباشر، وسجل مالي غير قابل للتعديل (LOCKED). التصحيحات تسجل كحركات تعويضية جديدة."
+                        else
+                            "Modèle Syndic Unique : Actions directes et registre financier immuable (LOCKED). Les corrections créent de nouvelles écritures compensatoires sans modifier l'original.",
                         style = MaterialTheme.typography.bodySmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant
                     )
@@ -99,10 +85,10 @@ fun SyndicManagementScreen(
             }
         }
 
-        // Quick Action Grid (Large, readable buttons)
+        // Quick Action Buttons
         item {
             Text(
-                text = if (appLanguage == AppLanguage.ARABIC) "إجراءات التسيير المالي والإداري" else "Actions de Gestion Rapide",
+                text = if (appLanguage == AppLanguage.ARABIC) "إجراءات التسيير المالي والإداري" else "Actions de Gestion Financière & Administrative",
                 style = MaterialTheme.typography.titleMedium,
                 fontWeight = FontWeight.Bold
             )
@@ -162,11 +148,11 @@ fun SyndicManagementScreen(
                 }
 
                 OutlinedButton(
-                    onClick = { activeDialog = "REQUEST_CORRECTION" },
+                    onClick = { activeDialog = "RECORD_CORRECTION" },
                     modifier = Modifier
                         .weight(1f)
                         .height(52.dp)
-                        .testTag("action_request_correction"),
+                        .testTag("action_record_correction"),
                     shape = RoundedCornerShape(12.dp)
                 ) {
                     Icon(Icons.Default.AutoFixHigh, contentDescription = null)
@@ -207,7 +193,58 @@ fun SyndicManagementScreen(
             }
         }
 
-        // DOUBLE APPROVAL QUEUE SECTION
+        // Active Projects Overview
+        item {
+            Spacer(modifier = Modifier.height(8.dp))
+            Text(
+                text = if (appLanguage == AppLanguage.ARABIC) "المشاريع المالية الجارية" else "Projets Financiers Actifs",
+                style = MaterialTheme.typography.titleMedium,
+                fontWeight = FontWeight.Bold
+            )
+        }
+
+        items(projects) { project ->
+            Card(
+                shape = RoundedCornerShape(12.dp),
+                colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
+                elevation = CardDefaults.cardElevation(2.dp),
+                modifier = Modifier.fillMaxWidth()
+            ) {
+                Column(modifier = Modifier.padding(14.dp)) {
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Text(project.title, fontWeight = FontWeight.Bold, fontSize = 15.sp)
+                        Badge(containerColor = AtlasEmerald) {
+                            Text(project.status.name, modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp))
+                        }
+                    }
+                    Spacer(modifier = Modifier.height(4.dp))
+                    Text(
+                        text = "Coût: ${project.totalCost} DZD • Quote-part: ${project.contributionPerApt} DZD/appartement (40 appartements)",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                    Spacer(modifier = Modifier.height(4.dp))
+                    val progress = if (project.totalCost > 0) (project.totalCollected.toFloat() / project.totalCost).coerceIn(0f, 1f) else 0f
+                    LinearProgressIndicator(
+                        progress = { progress },
+                        modifier = Modifier.fillMaxWidth().height(6.dp),
+                        color = AtlasEmerald
+                    )
+                    Spacer(modifier = Modifier.height(4.dp))
+                    Text(
+                        text = "Collecté: ${project.totalCollected} DZD / ${project.totalCost} DZD (${(progress * 100).toInt()}%)",
+                        fontSize = 11.sp,
+                        color = AtlasEmerald
+                    )
+                }
+            }
+        }
+
+        // Recent Locked Transactions in Authoritative Ledger
         item {
             Spacer(modifier = Modifier.height(8.dp))
             Row(
@@ -216,281 +253,131 @@ fun SyndicManagementScreen(
                 verticalAlignment = Alignment.CenterVertically
             ) {
                 Text(
-                    text = if (appLanguage == AppLanguage.ARABIC) "قائمة الانتظار للموافقة الثنائية" else "File des Doubles Approbations",
+                    text = if (appLanguage == AppLanguage.ARABIC) "السجل المالي المقفل (LOCKED)" else "Registre Financier Verrouillé (LOCKED)",
                     style = MaterialTheme.typography.titleMedium,
                     fontWeight = FontWeight.Bold
                 )
-                Badge(containerColor = if (totalPendingCount > 0) SandAmber else AtlasEmerald) {
-                    Text("$totalPendingCount en attente", modifier = Modifier.padding(4.dp))
+                Badge(containerColor = AtlasEmerald) {
+                    Text("${lockedLedger.size} écritures", modifier = Modifier.padding(4.dp))
                 }
             }
         }
 
-        // 1. Pending Projects
-        if (pendingProjects.isNotEmpty()) {
-            item {
-                Text("Projets en attente de validation :", fontWeight = FontWeight.Bold, color = MaterialTheme.colorScheme.primary, fontSize = 14.sp)
-            }
-            items(pendingProjects) { p ->
-                val isCreator = p.creatorSyndicId == user.id
-                Card(
-                    shape = RoundedCornerShape(12.dp),
-                    colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
-                    elevation = CardDefaults.cardElevation(2.dp),
-                    modifier = Modifier.fillMaxWidth()
+        items(lockedLedger.take(15)) { tx ->
+            Card(
+                shape = RoundedCornerShape(10.dp),
+                colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
+                modifier = Modifier.fillMaxWidth()
+            ) {
+                Row(
+                    modifier = Modifier.fillMaxWidth().padding(12.dp),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
                 ) {
-                    Column(modifier = Modifier.padding(14.dp)) {
-                        Text(p.title, fontWeight = FontWeight.Bold, fontSize = 15.sp)
-                        Text("${p.totalCost} DZD (${p.contributionPerApt} DZD/apt) • Créé par : ${p.creatorName}", style = MaterialTheme.typography.bodySmall)
-
-                        Spacer(modifier = Modifier.height(8.dp))
-
-                        if (isCreator) {
-                            Surface(
-                                shape = RoundedCornerShape(6.dp),
-                                color = SandAmber.copy(alpha = 0.15f),
-                                modifier = Modifier.fillMaxWidth()
-                            ) {
-                                Row(modifier = Modifier.padding(8.dp), verticalAlignment = Alignment.CenterVertically) {
-                                    Icon(Icons.Default.HourglassEmpty, contentDescription = null, tint = SandAmber, modifier = Modifier.size(16.dp))
-                                    Spacer(modifier = Modifier.width(6.dp))
-                                    Text(
-                                        text = "Vous avez créé ce projet. En attente de validation par l'autre syndic (Règle de sécurité).",
-                                        fontSize = 11.sp,
-                                        color = SandAmber
-                                    )
-                                }
-                            }
-                        } else {
-                            Row(
-                                modifier = Modifier.fillMaxWidth(),
-                                horizontalArrangement = Arrangement.End,
-                                verticalAlignment = Alignment.CenterVertically
-                            ) {
-                                TextButton(onClick = { onApproveProject(p.id, false, "Refusé par co-syndic") }) {
-                                    Text("Rejeter", color = CoralRed)
-                                }
-                                Spacer(modifier = Modifier.width(8.dp))
-                                Button(
-                                    onClick = { onApproveProject(p.id, true, null) },
-                                    colors = ButtonDefaults.buttonColors(containerColor = AtlasEmerald),
-                                    modifier = Modifier.testTag("approve_project_${p.id}")
+                    Column(modifier = Modifier.weight(1f)) {
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            Text(tx.txId, fontWeight = FontWeight.Bold, fontSize = 13.sp)
+                            Spacer(modifier = Modifier.width(6.dp))
+                            if (tx.isCorrection) {
+                                Surface(
+                                    shape = RoundedCornerShape(4.dp),
+                                    color = SandAmber.copy(alpha = 0.2f)
                                 ) {
-                                    Text("Valider & Activer", fontWeight = FontWeight.Bold)
+                                    Text("CORRECTION", fontSize = 9.sp, color = SandAmber, fontWeight = FontWeight.Bold, modifier = Modifier.padding(horizontal = 4.dp))
                                 }
                             }
                         }
-                    }
-                }
-            }
-        }
-
-        // 2. Pending Expenses
-        if (pendingExpenses.isNotEmpty()) {
-            item {
-                Text("Dépenses en attente de double approbation :", fontWeight = FontWeight.Bold, color = CoralRed, fontSize = 14.sp)
-            }
-            items(pendingExpenses) { exp ->
-                val isCreator = exp.creatorSyndicId == user.id
-                Card(
-                    shape = RoundedCornerShape(12.dp),
-                    colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
-                    elevation = CardDefaults.cardElevation(2.dp),
-                    modifier = Modifier.fillMaxWidth()
-                ) {
-                    Column(modifier = Modifier.padding(14.dp)) {
-                        Row(
-                            modifier = Modifier.fillMaxWidth(),
-                            horizontalArrangement = Arrangement.SpaceBetween
-                        ) {
-                            Text(exp.supplier ?: "Dépense", fontWeight = FontWeight.Bold, fontSize = 15.sp)
-                            Text("${exp.amount} DZD", fontWeight = FontWeight.Bold, color = CoralRed)
+                        val desc = when (tx.type) {
+                            TransactionType.OWNER_PAYMENT -> "Paiement Apt ${tx.apartmentNumber} (${tx.ownerName})"
+                            TransactionType.EXPENSE -> "Dépense: ${tx.supplier} (${tx.invoiceNumber ?: "Facture"})"
+                            TransactionType.CORRECTION_CREDIT -> "Correction Crédit (Réf: ${tx.originalTxId ?: "N/A"})"
+                            TransactionType.CORRECTION_DEBIT -> "Correction Débit (Réf: ${tx.originalTxId ?: "N/A"})"
                         }
-                        Text("Facture N°: ${exp.invoiceNumber ?: "N/A"} • Créé par: ${exp.creatorName}", style = MaterialTheme.typography.bodySmall)
-
-                        Spacer(modifier = Modifier.height(8.dp))
-
-                        if (isCreator) {
-                            Surface(
-                                shape = RoundedCornerShape(6.dp),
-                                color = SandAmber.copy(alpha = 0.15f),
-                                modifier = Modifier.fillMaxWidth()
-                            ) {
-                                Row(modifier = Modifier.padding(8.dp), verticalAlignment = Alignment.CenterVertically) {
-                                    Icon(Icons.Default.HourglassEmpty, contentDescription = null, tint = SandAmber, modifier = Modifier.size(16.dp))
-                                    Spacer(modifier = Modifier.width(6.dp))
-                                    Text("Créé par vous. Seul l'autre syndic peut approuver cette dépense.", fontSize = 11.sp, color = SandAmber)
-                                }
-                            }
-                        } else {
-                            Row(
-                                modifier = Modifier.fillMaxWidth(),
-                                horizontalArrangement = Arrangement.End
-                            ) {
-                                TextButton(onClick = { onApproveExpense(exp.txId, false, "Rejeté") }) {
-                                    Text("Rejeter", color = CoralRed)
-                                }
-                                Spacer(modifier = Modifier.width(8.dp))
-                                Button(
-                                    onClick = { onApproveExpense(exp.txId, true, null) },
-                                    colors = ButtonDefaults.buttonColors(containerColor = AtlasEmerald),
-                                    modifier = Modifier.testTag("approve_expense_${exp.txId}")
-                                ) {
-                                    Text("Approuver & Verrouiller", fontWeight = FontWeight.Bold)
-                                }
-                            }
+                        Text(desc, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                        if (tx.originalTxId != null) {
+                            Text("Transaction d'origine préservée: ${tx.originalTxId}", fontSize = 10.sp, color = MaterialTheme.colorScheme.outline)
                         }
                     }
-                }
-            }
-        }
 
-        // 3. Pending Corrections
-        if (pendingCorrections.isNotEmpty()) {
-            item {
-                Text("Demandes de correction financière :", fontWeight = FontWeight.Bold, color = SandAmber, fontSize = 14.sp)
-            }
-            items(pendingCorrections) { corr ->
-                val isCreator = corr.creatorSyndicId == user.id
-                Card(
-                    shape = RoundedCornerShape(12.dp),
-                    colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
-                    elevation = CardDefaults.cardElevation(2.dp),
-                    modifier = Modifier.fillMaxWidth()
-                ) {
-                    Column(modifier = Modifier.padding(14.dp)) {
-                        Text("Correction sur transaction : ${corr.originalTxId}", fontWeight = FontWeight.Bold)
-                        Text("Montant ajusté : ${corr.amount} DZD (${corr.type})", style = MaterialTheme.typography.bodyMedium)
-                        Text("Motif : ${corr.correctionReason}", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
-
-                        Spacer(modifier = Modifier.height(8.dp))
-
-                        if (isCreator) {
-                            Text("En attente de validation par le 2ème syndic.", fontSize = 11.sp, color = SandAmber)
-                        } else {
-                            Row(
-                                modifier = Modifier.fillMaxWidth(),
-                                horizontalArrangement = Arrangement.End
-                            ) {
-                                TextButton(onClick = { onApproveCorrection(corr.txId, false, "Refusé") }) {
-                                    Text("Rejeter", color = CoralRed)
-                                }
-                                Spacer(modifier = Modifier.width(8.dp))
-                                Button(
-                                    onClick = { onApproveCorrection(corr.txId, true, null) },
-                                    colors = ButtonDefaults.buttonColors(containerColor = AtlasEmerald)
-                                ) {
-                                    Text("Valider Correction", fontWeight = FontWeight.Bold)
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-        }
-
-        if (totalPendingCount == 0) {
-            item {
-                Surface(
-                    color = AtlasEmerald.copy(alpha = 0.1f),
-                    shape = RoundedCornerShape(10.dp),
-                    modifier = Modifier.fillMaxWidth()
-                ) {
-                    Row(
-                        modifier = Modifier.padding(14.dp),
-                        verticalAlignment = Alignment.CenterVertically
-                    ) {
-                        Icon(Icons.Default.CheckCircle, contentDescription = null, tint = AtlasEmerald)
-                        Spacer(modifier = Modifier.width(10.dp))
-                        Text(
-                            text = if (appLanguage == AppLanguage.ARABIC) "لا توجد عمليات معلقة، كل السجلات معتمدة ومقفلة." else "Aucune opération en attente, le registre financier est à jour.",
-                            fontSize = 13.sp,
-                            fontWeight = FontWeight.Medium,
-                            color = AtlasEmerald
-                        )
-                    }
+                    val isCredit = (tx.type == TransactionType.OWNER_PAYMENT || tx.type == TransactionType.CORRECTION_CREDIT)
+                    Text(
+                        text = if (isCredit) "+${tx.amount} DZD" else "-${tx.amount} DZD",
+                        fontWeight = FontWeight.Bold,
+                        color = if (isCredit) AtlasEmerald else CoralRed,
+                        fontSize = 14.sp
+                    )
                 }
             }
         }
     }
 
-    // Dialog 1: Record Owner Payment
-    if (activeDialog == "RECORD_PAYMENT") {
-        RecordPaymentDialog(
-            projects = projects.filter { it.status == ProjectStatus.APPROVED },
-            appLanguage = appLanguage,
-            onDismiss = { activeDialog = null },
-            onConfirm = { projId, projTitle, aptNum, amt, method ->
-                onRecordPayment(projId, projTitle, aptNum, aptNum.toLong(), "Copropriétaire Apt $aptNum", amt, method)
-                activeDialog = null
-            }
-        )
-    }
-
-    // Dialog 2: New Financial Project
-    if (activeDialog == "NEW_PROJECT") {
-        NewProjectDialog(
-            appLanguage = appLanguage,
-            onDismiss = { activeDialog = null },
-            onConfirm = { title, desc, cost ->
-                onCreateProject(title, desc, cost)
-                activeDialog = null
-            }
-        )
-    }
-
-    // Dialog 3: New Expense
-    if (activeDialog == "NEW_EXPENSE") {
-        NewExpenseDialog(
-            projects = projects.filter { it.status == ProjectStatus.APPROVED },
-            appLanguage = appLanguage,
-            onDismiss = { activeDialog = null },
-            onConfirm = { cat, desc, amt, supp, inv, method, projId ->
-                onCreateExpense(projId, null, cat, desc, amt, supp, inv, method)
-                activeDialog = null
-            }
-        )
-    }
-
-    // Dialog 4: Financial Correction
-    if (activeDialog == "REQUEST_CORRECTION") {
-        FinancialCorrectionDialog(
-            lockedTransactions = lockedLedger,
-            appLanguage = appLanguage,
-            onDismiss = { activeDialog = null },
-            onConfirm = { origTxId, newAmt, reason ->
-                onRequestCorrection(origTxId, newAmt, reason)
-                activeDialog = null
-            }
-        )
-    }
-
-    // Dialog 5: New Announcement
-    if (activeDialog == "NEW_ANNOUNCEMENT") {
-        NewAnnouncementDialog(
-            appLanguage = appLanguage,
-            onDismiss = { activeDialog = null },
-            onConfirm = { title, content, cat ->
-                onPublishAnnouncement(title, content, cat)
-                activeDialog = null
-            }
-        )
-    }
-
-    // Dialog 6: New Meeting
-    if (activeDialog == "NEW_MEETING") {
-        NewMeetingDialog(
-            appLanguage = appLanguage,
-            onDismiss = { activeDialog = null },
-            onConfirm = { title, date, loc, desc, agenda ->
-                onScheduleMeeting(title, date, loc, desc, agenda)
-                activeDialog = null
-            }
-        )
+    // --- Dialogs ---
+    when (activeDialog) {
+        "RECORD_PAYMENT" -> {
+            RecordPaymentDialog(
+                projects = projects,
+                appLanguage = appLanguage,
+                onDismiss = { activeDialog = null },
+                onConfirm = { pId, pTitle, apt, amt, meth ->
+                    activeDialog = null
+                    onRecordPayment(pId, pTitle, apt, apt.toLong(), "Apt $apt", amt, meth)
+                }
+            )
+        }
+        "NEW_PROJECT" -> {
+            NewProjectDialog(
+                appLanguage = appLanguage,
+                onDismiss = { activeDialog = null },
+                onConfirm = { title, desc, cost ->
+                    activeDialog = null
+                    onCreateProject(title, desc, cost)
+                }
+            )
+        }
+        "NEW_EXPENSE" -> {
+            NewExpenseDialog(
+                projects = projects,
+                appLanguage = appLanguage,
+                onDismiss = { activeDialog = null },
+                onConfirm = { cat, desc, amt, sup, inv, meth, pId ->
+                    activeDialog = null
+                    onCreateExpense(pId, null, cat, desc, amt, sup, inv, meth)
+                }
+            )
+        }
+        "RECORD_CORRECTION" -> {
+            FinancialCorrectionDialog(
+                lockedTransactions = lockedLedger,
+                appLanguage = appLanguage,
+                onDismiss = { activeDialog = null },
+                onConfirm = { origTxId, delta, isDebit, reason ->
+                    activeDialog = null
+                    onRecordCorrection(origTxId, delta, isDebit, reason)
+                }
+            )
+        }
+        "NEW_ANNOUNCEMENT" -> {
+            NewAnnouncementDialog(
+                appLanguage = appLanguage,
+                onDismiss = { activeDialog = null },
+                onConfirm = { t, c, cat ->
+                    activeDialog = null
+                    onPublishAnnouncement(t, c, cat)
+                }
+            )
+        }
+        "NEW_MEETING" -> {
+            NewMeetingDialog(
+                appLanguage = appLanguage,
+                onDismiss = { activeDialog = null },
+                onConfirm = { t, d, l, desc, ag ->
+                    activeDialog = null
+                    onScheduleMeeting(t, d, l, desc, ag)
+                }
+            )
+        }
     }
 }
-
-// --- SUB-DIALOGS ---
 
 @Composable
 fun RecordPaymentDialog(
@@ -511,9 +398,12 @@ fun RecordPaymentDialog(
         title = { Text(Strings.recordPayment(appLanguage), fontWeight = FontWeight.Bold) },
         text = {
             Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
-                Text(Strings.directLockNotice(appLanguage), fontSize = 12.sp, color = SandAmber)
+                Text(
+                    text = "Enregistrement direct par le Syndic. La transaction est immédiatement verrouillée (LOCKED).",
+                    fontSize = 12.sp,
+                    color = AtlasEmerald
+                )
 
-                // Apartment Number (1..40)
                 OutlinedTextField(
                     value = selectedAptNumber.toString(),
                     onValueChange = { selectedAptNumber = it.toIntOrNull()?.coerceIn(1, 40) ?: 1 },
@@ -593,11 +483,10 @@ fun NewProjectDialog(
                 OutlinedTextField(
                     value = costText,
                     onValueChange = { costText = it },
-                    label = { Text("Coût total estimé (DZD)") },
+                    label = { Text("Coût total (DZD)") },
                     modifier = Modifier.fillMaxWidth().testTag("project_cost_input")
                 )
 
-                // Auto calculation preview for the 40 apartments
                 Surface(
                     color = MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.4f),
                     shape = RoundedCornerShape(8.dp),
@@ -608,8 +497,6 @@ fun NewProjectDialog(
                         Text("$totalCost DZD / 40 = $perApt DZD par appartement", fontSize = 13.sp, color = MaterialTheme.colorScheme.primary, fontWeight = FontWeight.Bold)
                     }
                 }
-
-                Text("Validation obligatoire par le second syndic avant ouverture.", fontSize = 11.sp, color = SandAmber)
             }
         },
         confirmButton = {
@@ -621,7 +508,7 @@ fun NewProjectDialog(
                 },
                 modifier = Modifier.testTag("submit_new_project_button")
             ) {
-                Text("Soumettre au 2ème Syndic", fontWeight = FontWeight.Bold)
+                Text("Créer & Activer le Projet", fontWeight = FontWeight.Bold)
             }
         },
         dismissButton = { TextButton(onClick = onDismiss) { Text("Annuler") } }
@@ -644,7 +531,7 @@ fun NewExpenseDialog(
 
     AlertDialog(
         onDismissRequest = onDismiss,
-        title = { Text("Créer une Dépense d'Immeuble", fontWeight = FontWeight.Bold) },
+        title = { Text("Enregistrer une Dépense", fontWeight = FontWeight.Bold) },
         text = {
             Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
                 OutlinedTextField(
@@ -674,8 +561,6 @@ fun NewExpenseDialog(
                     label = { Text("Description des travaux ou achats") },
                     modifier = Modifier.fillMaxWidth()
                 )
-
-                Text("Double approbation requise du second syndic.", fontSize = 11.sp, color = SandAmber)
             }
         },
         confirmButton = {
@@ -687,7 +572,7 @@ fun NewExpenseDialog(
                     }
                 }
             ) {
-                Text("Soumettre pour approbation", fontWeight = FontWeight.Bold)
+                Text("Enregistrer & Verrouiller", fontWeight = FontWeight.Bold)
             }
         },
         dismissButton = { TextButton(onClick = onDismiss) { Text("Annuler") } }
@@ -699,19 +584,20 @@ fun FinancialCorrectionDialog(
     lockedTransactions: List<FinancialLedgerEntry>,
     appLanguage: AppLanguage,
     onDismiss: () -> Unit,
-    onConfirm: (String, Long, String) -> Unit
+    onConfirm: (String, Long, Boolean, String) -> Unit
 ) {
     var selectedTxId by remember { mutableStateOf(lockedTransactions.firstOrNull()?.txId ?: "") }
-    var newAmountText by remember { mutableStateOf("") }
+    var deltaText by remember { mutableStateOf("") }
+    var isDebit by remember { mutableStateOf(true) }
     var reason by remember { mutableStateOf("") }
 
     AlertDialog(
         onDismissRequest = onDismiss,
-        title = { Text("Demande de Correction Financière", fontWeight = FontWeight.Bold) },
+        title = { Text("Correction Financière Directe", fontWeight = FontWeight.Bold) },
         text = {
             Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
                 Text(
-                    text = "L'enregistrement initial restera immuable. Une nouvelle transaction corrective sera soumise au 2ème syndic.",
+                    text = "L'écriture d'origine reste IMMUABLE. Une nouvelle transaction corrective sera enregistrée avec référence à la transaction originale.",
                     fontSize = 12.sp,
                     color = MaterialTheme.colorScheme.onSurfaceVariant
                 )
@@ -719,16 +605,29 @@ fun FinancialCorrectionDialog(
                 OutlinedTextField(
                     value = selectedTxId,
                     onValueChange = { selectedTxId = it },
-                    label = { Text("Identifiant Transaction (ex: TX-2026-000101)") },
+                    label = { Text("Identifiant Transaction Originale (original_tx_id)") },
                     modifier = Modifier.fillMaxWidth()
                 )
 
                 OutlinedTextField(
-                    value = newAmountText,
-                    onValueChange = { newAmountText = it },
-                    label = { Text("Montant corrigé réel (DZD)") },
+                    value = deltaText,
+                    onValueChange = { deltaText = it },
+                    label = { Text("Montant de régularisation (DZD)") },
                     modifier = Modifier.fillMaxWidth()
                 )
+
+                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    FilterChip(
+                        selected = isDebit,
+                        onClick = { isDebit = true },
+                        label = { Text("Débit (-)") }
+                    )
+                    FilterChip(
+                        selected = !isDebit,
+                        onClick = { isDebit = false },
+                        label = { Text("Crédit (+)") }
+                    )
+                }
 
                 OutlinedTextField(
                     value = reason,
@@ -742,13 +641,13 @@ fun FinancialCorrectionDialog(
         confirmButton = {
             Button(
                 onClick = {
-                    val amt = newAmountText.toLongOrNull() ?: 0L
-                    if (selectedTxId.isNotBlank() && reason.isNotBlank()) {
-                        onConfirm(selectedTxId, amt, reason)
+                    val delta = deltaText.toLongOrNull() ?: 0L
+                    if (selectedTxId.isNotBlank() && delta > 0 && reason.isNotBlank()) {
+                        onConfirm(selectedTxId, delta, isDebit, reason)
                     }
                 }
             ) {
-                Text("Soumettre Correction", fontWeight = FontWeight.Bold)
+                Text("Enregistrer Correction", fontWeight = FontWeight.Bold)
             }
         },
         dismissButton = { TextButton(onClick = onDismiss) { Text("Annuler") } }
@@ -809,8 +708,8 @@ fun NewMeetingDialog(
 ) {
     var title by remember { mutableStateOf("Assemblée Générale Ordinaire 2026") }
     var location by remember { mutableStateOf("Hall de l'immeuble") }
-    var agenda by remember { mutableStateOf("1. Bilan financier\n2. Travaux ascenseur\n3. Questions diverses") }
-    var description by remember { mutableStateOf("Convocation officielle de tous les 40 copropriétaires.") }
+    var agenda by remember { mutableStateOf("1. Bilan financier officiel\n2. Travaux ascenseur\n3. Questions diverses") }
+    var description by remember { mutableStateOf("Convocation officielle des 40 copropriétaires.") }
 
     AlertDialog(
         onDismissRequest = onDismiss,

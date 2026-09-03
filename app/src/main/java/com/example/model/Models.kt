@@ -2,7 +2,7 @@ package com.example.model
 
 enum class UserRole {
     OWNER,
-    OWNER_SYNDIC
+    SYNDIC
 }
 
 data class User(
@@ -25,10 +25,9 @@ data class Apartment(
 )
 
 enum class ProjectStatus {
-    PENDING_APPROVAL,
-    APPROVED,
-    REJECTED,
-    COMPLETED
+    ACTIVE,
+    COMPLETED,
+    CANCELLED
 }
 
 data class Project(
@@ -40,12 +39,8 @@ data class Project(
     val contributionPerApt: Long = totalCost / 40,
     val creatorSyndicId: Long,
     val creatorName: String,
-    val approverSyndicId: Long? = null,
-    val approverName: String? = null,
-    val status: ProjectStatus = ProjectStatus.PENDING_APPROVAL,
-    val rejectionReason: String? = null,
+    val status: ProjectStatus = ProjectStatus.ACTIVE,
     val createdAt: Long = System.currentTimeMillis(),
-    val approvedAt: Long? = null,
     val totalCollected: Long = 0L
 )
 
@@ -57,9 +52,7 @@ enum class TransactionType {
 }
 
 enum class TransactionStatus {
-    PENDING_APPROVAL,
-    LOCKED,
-    REJECTED
+    LOCKED
 }
 
 enum class PaymentMethod {
@@ -80,16 +73,14 @@ data class FinancialLedgerEntry(
     val paymentMethod: PaymentMethod = PaymentMethod.CASH,
     val creatorSyndicId: Long,
     val creatorName: String,
-    val approverSyndicId: Long? = null,
-    val approverName: String? = null,
     val status: TransactionStatus = TransactionStatus.LOCKED,
+    val isCorrection: Boolean = false,
     val originalTxId: String? = null,
     val correctionReason: String? = null,
     val supplier: String? = null,
     val invoiceNumber: String? = null,
     val expenseCategory: String? = null,
     val createdAt: Long = System.currentTimeMillis(),
-    val approvedAt: Long? = null,
     val isPendingSync: Boolean = false
 )
 

@@ -96,7 +96,7 @@ fun OwnerHomeScreen(
                     )
                     Text(
                         text = Strings.apartment(appLanguage, user.apartmentNumber, user.floor) +
-                                (if (user.role == UserRole.OWNER_SYNDIC) " • (Syndic)" else " • (Copropriétaire)"),
+                                (if (user.role == UserRole.SYNDIC) " • (Syndic)" else " • (Copropriétaire)"),
                         color = Color.White.copy(alpha = 0.9f),
                         fontSize = 13.sp
                     )

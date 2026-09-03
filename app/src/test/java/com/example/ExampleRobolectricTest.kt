@@ -6,6 +6,7 @@ import androidx.test.core.app.ApplicationProvider
 import com.example.data.BuildingDatabase
 import com.example.data.BuildingRepository
 import com.example.model.PaymentMethod
+import com.example.model.TransactionType
 import com.example.model.User
 import com.example.model.UserRole
 import kotlinx.coroutines.flow.first
@@ -30,16 +31,16 @@ class ExampleRobolectricTest {
         username = "apt1",
         fullName = "Ahmed Benali",
         phoneNumber = "0550112233",
-        role = UserRole.OWNER_SYNDIC,
+        role = UserRole.SYNDIC,
         apartmentNumber = 1,
         floor = 0
     )
-    private val syndic2 = User(
+    private val owner2 = User(
         id = 2L,
         username = "apt2",
         fullName = "Karim Mansouri",
         phoneNumber = "0550223344",
-        role = UserRole.OWNER_SYNDIC,
+        role = UserRole.OWNER,
         apartmentNumber = 2,
         floor = 0
     )
@@ -88,29 +89,35 @@ class ExampleRobolectricTest {
     }
 
     @Test
-    fun testFinancialProjectDoubleApprovalInvariant() = runBlocking {
-        // Syndic 1 creates project
+    fun testSingleSyndicDirectProjectCreation() = runBlocking {
+        // Non-syndic owner cannot create project
+        val nonSyndicResult = repository.createFinancialProject(
+            "Travaux Non Autorises",
+            "Tentative copropriétaire",
+            100_000L,
+            owner2
+        )
+        assertTrue("Non-syndic cannot create project", nonSyndicResult.isFailure)
+
+        // Single Syndic creates project directly without double approval
         val createResult = repository.createFinancialProject(
             "Travaux Ascenseur Test",
             "Changement des câbles",
             200_000L,
             syndic1
         )
-        assertTrue(createResult.isSuccess)
+        assertTrue("Syndic direct project creation must succeed", createResult.isSuccess)
         val projId = createResult.getOrThrow()
 
-        // Rule: Syndic 1 CANNOT approve their own project!
-        val selfApproveResult = repository.approveFinancialProject(projId, syndic1, true)
-        assertTrue("Self-approval must be rejected", selfApproveResult.isFailure)
-
-        // Rule: Syndic 2 CAN approve the project
-        val secondSyndicApproveResult = repository.approveFinancialProject(projId, syndic2, true)
-        assertTrue("Second syndic approval must succeed", secondSyndicApproveResult.isSuccess)
+        val projects = repository.getAllProjectsFlow().first()
+        val proj = projects.find { it.id == projId }
+        assertNotNull(proj)
+        assertEquals("ACTIVE", proj?.status?.name)
     }
 
     @Test
-    fun testExpenseDoubleApprovalInvariant() = runBlocking {
-        // Syndic 2 creates an expense
+    fun testSingleSyndicDirectExpenseCreation() = runBlocking {
+        // Single Syndic creates an expense directly into LOCKED ledger
         val createExpenseResult = repository.createExpense(
             null,
             null,
@@ -120,18 +127,16 @@ class ExampleRobolectricTest {
             "SARL Élec Alger",
             "FAC-2026-999",
             PaymentMethod.BANK_TRANSFER,
-            syndic2
+            syndic1
         )
-        assertTrue(createExpenseResult.isSuccess)
+        assertTrue("Direct expense creation must succeed", createExpenseResult.isSuccess)
         val txId = createExpenseResult.getOrThrow()
 
-        // Rule: Syndic 2 cannot self-approve
-        val selfApprove = repository.approveExpense(txId, syndic2, true)
-        assertTrue("Self-approval of expense must fail", selfApprove.isFailure)
-
-        // Rule: Syndic 1 approves
-        val syndic1Approve = repository.approveExpense(txId, syndic1, true)
-        assertTrue("Syndic 1 approval must succeed", syndic1Approve.isSuccess)
+        val ledger = repository.getLockedLedgerFlow().first()
+        val tx = ledger.find { it.txId == txId }
+        assertNotNull(tx)
+        assertEquals("LOCKED", tx?.status?.name)
+        assertEquals(45_000L, tx?.amount)
     }
 
     @Test
@@ -153,5 +158,48 @@ class ExampleRobolectricTest {
         val tx = ledger.find { it.txId == txId }
         assertNotNull(tx)
         assertEquals("LOCKED", tx?.status?.name)
+    }
+
+    @Test
+    fun testFinancialCorrectionPreservesOriginalTransaction() = runBlocking {
+        // 1. Record original payment
+        val paymentResult = repository.recordOwnerPayment(
+            "PRJ-01",
+            "Ravalement et Peinture Façades",
+            2,
+            owner2.id,
+            owner2.fullName,
+            6000L,
+            PaymentMethod.CASH,
+            syndic1
+        )
+        assertTrue(paymentResult.isSuccess)
+        val originalTxId = paymentResult.getOrThrow()
+
+        // 2. Record financial correction referencing originalTxId
+        val correctionResult = repository.recordFinancialCorrection(
+            originalTxId = originalTxId,
+            correctionDelta = 1000L,
+            isDebit = true,
+            reason = "Erreur de saisie: montant réel 5000 DZD au lieu de 6000 DZD",
+            syndic = syndic1
+        )
+        assertTrue(correctionResult.isSuccess)
+        val correctionTxId = correctionResult.getOrThrow()
+
+        // 3. Verify original transaction is completely unchanged and still LOCKED
+        val ledger = repository.getLockedLedgerFlow().first()
+        val originalTx = ledger.find { it.txId == originalTxId }
+        assertNotNull("Original transaction must still exist", originalTx)
+        assertEquals(6000L, originalTx?.amount)
+        assertEquals("LOCKED", originalTx?.status?.name)
+
+        // 4. Verify correction transaction references originalTxId
+        val corrTx = ledger.find { it.txId == correctionTxId }
+        assertNotNull("Correction transaction must exist", corrTx)
+        assertEquals(originalTxId, corrTx?.originalTxId)
+        assertTrue(corrTx?.isCorrection == true)
+        assertEquals(1000L, corrTx?.amount)
+        assertEquals(TransactionType.CORRECTION_DEBIT, corrTx?.type)
     }
 }

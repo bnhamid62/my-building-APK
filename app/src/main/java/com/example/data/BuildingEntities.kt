@@ -10,7 +10,7 @@ data class UserEntity(
     val passwordHash: String,
     val fullName: String,
     val phoneNumber: String,
-    val role: String, // OWNER or OWNER_SYNDIC
+    val role: String, // OWNER or SYNDIC
     val apartmentNumber: Int,
     val floor: Int
 )
@@ -34,12 +34,8 @@ data class ProjectEntity(
     val contributionPerApt: Long,
     val creatorSyndicId: Long,
     val creatorName: String,
-    val approverSyndicId: Long?,
-    val approverName: String?,
-    val status: String, // PENDING_APPROVAL, APPROVED, REJECTED, COMPLETED
-    val rejectionReason: String?,
-    val createdAt: Long,
-    val approvedAt: Long?
+    val status: String, // ACTIVE, COMPLETED, CANCELLED
+    val createdAt: Long
 )
 
 @Entity(tableName = "financial_ledger")
@@ -55,16 +51,14 @@ data class LedgerEntity(
     val paymentMethod: String,
     val creatorSyndicId: Long,
     val creatorName: String,
-    val approverSyndicId: Long?,
-    val approverName: String?,
-    val status: String, // PENDING_APPROVAL, LOCKED, REJECTED
+    val status: String, // LOCKED
+    val isCorrection: Boolean = false,
     val originalTxId: String?,
     val correctionReason: String?,
     val supplier: String?,
     val invoiceNumber: String?,
     val expenseCategory: String?,
     val createdAt: Long,
-    val approvedAt: Long?,
     val isPendingSync: Boolean = false
 )
 

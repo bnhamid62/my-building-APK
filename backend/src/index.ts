@@ -2,15 +2,25 @@ import express, { Request, Response, NextFunction } from 'express';
 import cors from 'cors';
 import bcrypt from 'bcryptjs';
 import jwt from 'jsonwebtoken';
-import db, { initDatabase, getNextTxId } from './db';
+import crypto from 'crypto';
+import db, {
+  query,
+  initDatabase,
+  getNextTxId,
+  appendSyncEvent,
+  appendAuditLog,
+  getOfficialBuildingBalance,
+  validateBuildingTopology
+} from './db';
 
-const JWT_SECRET = process.env.JWT_SECRET || 'amarati_super_secure_jwt_secret_key_2026';
+const JWT_SECRET = process.env.JWT_SECRET || 'amarati_authoritative_pg_jwt_secret_2026';
 const PORT = process.env.PORT || 3000;
 
 export interface AuthenticatedUser {
-  id: number;
+  id: string;
   username: string;
-  role: 'OWNER' | 'OWNER_SYNDIC';
+  role: 'SYNDIC' | 'OWNER';
+  apartment_id: string;
   apartment_number: number;
   floor: number;
   full_name: string;
@@ -37,37 +47,96 @@ export function authMiddleware(req: AuthRequest, res: Response, next: NextFuncti
 }
 
 export function syndicOnly(req: AuthRequest, res: Response, next: NextFunction) {
-  if (req.user?.role !== 'OWNER_SYNDIC') {
-    return res.status(403).json({ error: 'FORBIDDEN: Only a Syndic can perform this administrative operation' });
+  if (req.user?.role !== 'SYNDIC') {
+    return res.status(403).json({ error: 'FORBIDDEN: Only the authorized building Syndic can perform this financial or administrative operation' });
   }
   next();
 }
 
+/**
+ * Robust Permanent Idempotency Guard with Request Hash Verification:
+ * A. Existing key + same request_hash -> return existing authoritative response
+ * B. Existing key + different request_hash -> HTTP 409 Conflict IDEMPOTENCY_KEY_REUSED_WITH_DIFFERENT_REQUEST
+ */
+async function handleIdempotency(
+  key: string,
+  userId: string,
+  requestPayload: any,
+  res: Response
+): Promise<{ handled: boolean; existingResponse?: any }> {
+  const hash = crypto.createHash('sha256').update(JSON.stringify(requestPayload)).digest('hex');
+
+  const existingRes = await query('SELECT * FROM idempotency_keys WHERE key = $1', [key]);
+  if (existingRes.rows.length > 0) {
+    const existing = existingRes.rows[0];
+    if (existing.request_hash === hash) {
+      // Identical request -> return existing authoritative response
+      res.status(existing.response_code).json(existing.response_body);
+      return { handled: true };
+    } else {
+      // Key reused with different payload -> strict conflict rejection
+      res.status(409).json({
+        error: 'IDEMPOTENCY_KEY_REUSED_WITH_DIFFERENT_REQUEST',
+        message: 'This idempotency key was previously submitted with different request parameters'
+      });
+      return { handled: true };
+    }
+  }
+
+  return { handled: false };
+}
+
+async function recordIdempotency(
+  key: string,
+  userId: string,
+  requestPayload: any,
+  responseCode: number,
+  responseBody: any
+): Promise<void> {
+  const hash = crypto.createHash('sha256').update(JSON.stringify(requestPayload)).digest('hex');
+  await query(`
+    INSERT INTO idempotency_keys (key, user_id, request_hash, response_code, response_body)
+    VALUES ($1, $2, $3, $4, $5)
+    ON CONFLICT (key) DO NOTHING
+  `, [key, userId, hash, responseCode, JSON.stringify(responseBody)]);
+}
+
 export function createApp() {
-  initDatabase();
   const app = express();
   app.use(cors());
   app.use(express.json());
 
-  // Health check
-  app.get('/api/health', (req, res) => {
-    res.json({ status: 'OK', service: 'Amarati Central Backend', timestamp: new Date().toISOString() });
+  // Health check & System Topology Status
+  app.get('/api/health', async (req, res) => {
+    const isTopologyValid = await validateBuildingTopology();
+    res.json({
+      status: 'OK',
+      database: 'PostgreSQL Authoritative Engine',
+      service: 'Amarati Central Backend',
+      topology_valid_40_apts_1_syndic: isTopologyValid,
+      timestamp: new Date().toISOString()
+    });
   });
 
-  // 1. AUTHENTICATION
-  app.post('/api/v1/auth/login', (req, res) => {
+  // 1. AUTHENTICATION & SECURITY
+  app.post('/api/v1/auth/login', async (req, res) => {
     const { username, password } = req.body;
     if (!username || !password) {
       return res.status(400).json({ error: 'BAD_REQUEST: Username and password are required' });
     }
 
-    const stmt = db.prepare('SELECT * FROM users WHERE username = ?');
-    const user = stmt.get(username.trim()) as any;
+    const userRes = await query(`
+      SELECT u.*, a.apartment_number, a.floor
+      FROM users u
+      JOIN apartments a ON u.apartment_id = a.id
+      WHERE u.username = $1
+    `, [username.trim()]);
 
-    if (!user) {
+    if (userRes.rows.length === 0) {
       return res.status(401).json({ error: 'UNAUTHORIZED: Invalid username or password' });
     }
 
+    const user = userRes.rows[0];
     const isMatch = bcrypt.compareSync(password.trim(), user.password_hash);
     if (!isMatch) {
       return res.status(401).json({ error: 'UNAUTHORIZED: Invalid username or password' });
@@ -77,6 +146,7 @@ export function createApp() {
       id: user.id,
       username: user.username,
       role: user.role,
+      apartment_id: user.apartment_id,
       apartment_number: user.apartment_number,
       floor: user.floor,
       full_name: user.full_name
@@ -84,11 +154,14 @@ export function createApp() {
 
     const token = jwt.sign(payload, JWT_SECRET, { expiresIn: '7d' });
 
-    // Record login audit
-    db.prepare(`
-      INSERT INTO audit_logs (actor_id, actor_name, action, entity_type, entity_id, details)
-      VALUES (?, ?, 'LOGIN', 'USER', ?, 'Connexion réussie')
-    `).run(user.id, user.full_name, String(user.id));
+    await appendAuditLog(
+      user.id,
+      user.full_name,
+      'LOGIN',
+      'USER',
+      user.id,
+      { ip: req.ip || '127.0.0.1' }
+    );
 
     res.json({
       token,
@@ -98,73 +171,80 @@ export function createApp() {
         full_name: user.full_name,
         phone: user.phone,
         role: user.role,
+        apartment_id: user.apartment_id,
         apartment_number: user.apartment_number,
         floor: user.floor
       }
     });
   });
 
-  app.post('/api/v1/auth/change-password', authMiddleware, (req: AuthRequest, res) => {
+  app.post('/api/v1/auth/change-password', authMiddleware, async (req: AuthRequest, res) => {
     const { old_password, new_password } = req.body;
     if (!old_password || !new_password || new_password.length < 6) {
       return res.status(400).json({ error: 'BAD_REQUEST: New password must be at least 6 characters' });
     }
 
-    const user = db.prepare('SELECT * FROM users WHERE id = ?').get(req.user!.id) as any;
+    const userRes = await query('SELECT * FROM users WHERE id = $1', [req.user!.id]);
+    const user = userRes.rows[0];
+
     if (!bcrypt.compareSync(old_password, user.password_hash)) {
       return res.status(401).json({ error: 'UNAUTHORIZED: Current password incorrect' });
     }
 
     const newHash = bcrypt.hashSync(new_password, 10);
-    db.prepare('UPDATE users SET password_hash = ? WHERE id = ?').run(newHash, req.user!.id);
+    await query('UPDATE users SET password_hash = $1 WHERE id = $2', [newHash, req.user!.id]);
 
-    db.prepare(`
-      INSERT INTO audit_logs (actor_id, actor_name, action, entity_type, entity_id, details)
-      VALUES (?, ?, 'PASSWORD_CHANGE', 'USER', ?, 'Mot de passe modifié avec succès')
-    `).run(req.user!.id, req.user!.full_name, String(req.user!.id));
+    await appendAuditLog(
+      req.user!.id,
+      req.user!.full_name,
+      'PASSWORD_CHANGE',
+      'USER',
+      req.user!.id,
+      { message: 'Mot de passe mis à jour' }
+    );
 
     res.json({ success: true, message: 'Password updated successfully' });
   });
 
-  // 2. APARTMENTS TRANSPARENCY
-  app.get('/api/v1/apartments', authMiddleware, (req, res) => {
-    const rows = db.prepare(`
+  // 2. APARTMENTS TRANSPARENCY (All 40 apartments on 10 levels)
+  app.get('/api/v1/apartments', authMiddleware, async (req, res) => {
+    const rows = (await query(`
       SELECT 
-        a.number,
+        a.id as apartment_id,
+        a.apartment_number,
         a.floor,
-        a.floor_label,
+        CASE WHEN a.floor = 0 THEN 'RDC' ELSE a.floor::text END as floor_label,
+        u.id as owner_id,
         u.full_name as owner_name,
         u.phone as owner_phone,
         u.role as owner_role,
         COALESCE((
-          SELECT SUM(l.amount) 
-          FROM financial_ledger l 
-          WHERE l.apartment_number = a.number AND l.status = 'LOCKED' AND l.type = 'OWNER_PAYMENT'
+          SELECT SUM(t.amount)
+          FROM financial_transactions t
+          WHERE t.apartment_id = a.id AND t.status = 'LOCKED' AND t.type = 'CREDIT'
         ), 0) as total_paid
       FROM apartments a
-      JOIN users u ON a.owner_id = u.id
-      ORDER BY a.number ASC
-    `).all();
+      JOIN users u ON u.apartment_id = a.id
+      ORDER BY a.apartment_number ASC
+    `)).rows;
 
     res.json(rows);
   });
 
-  // 3. FINANCIAL PROJECTS (Requires Double Approval: Syndic A != Syndic B)
-  app.get('/api/v1/projects', authMiddleware, (req, res) => {
-    const rows = db.prepare(`
+  // 3. FINANCIAL PROJECTS (Single-Syndic creates directly -> Status is immediately ACTIVE)
+  app.get('/api/v1/projects', authMiddleware, async (req, res) => {
+    const rows = (await query(`
       SELECT 
         p.*,
-        c.full_name as creator_name,
-        ap.full_name as approver_name
+        u.full_name as creator_name
       FROM projects p
-      JOIN users c ON p.creator_syndic_id = c.id
-      LEFT JOIN users ap ON p.approver_syndic_id = ap.id
+      JOIN users u ON p.created_by_syndic_id = u.id
       ORDER BY p.created_at DESC
-    `).all();
+    `)).rows;
     res.json(rows);
   });
 
-  app.post('/api/v1/projects', authMiddleware, syndicOnly, (req: AuthRequest, res) => {
+  app.post('/api/v1/projects', authMiddleware, syndicOnly, async (req: AuthRequest, res) => {
     const { title, description, total_cost } = req.body;
     if (!title || !description || !total_cost || Number(total_cost) <= 0) {
       return res.status(400).json({ error: 'BAD_REQUEST: Valid title, description, and total_cost are required' });
@@ -174,361 +254,436 @@ export function createApp() {
     const contribution = Math.floor(cost / 40);
     const projectId = `PRJ-2026-${Date.now().toString().slice(-4)}`;
 
-    db.prepare(`
-      INSERT INTO projects (id, title, description, total_cost, apartment_count, contribution_per_apt, creator_syndic_id, status)
-      VALUES (?, ?, ?, ?, 40, ?, ?, 'PENDING_APPROVAL')
-    `).run(projectId, title, description, cost, contribution, req.user!.id);
+    // Projects created by the single Syndic are immediately ACTIVE and authoritative
+    await query(`
+      INSERT INTO projects (id, title, description, total_cost, apartment_count, contribution_per_apt, created_by_syndic_id, status)
+      VALUES ($1, $2, $3, $4, 40, $5, $6, 'ACTIVE')
+    `, [projectId, title, description, cost, contribution, req.user!.id]);
 
-    db.prepare(`
-      INSERT INTO audit_logs (actor_id, actor_name, action, entity_type, entity_id, details)
-      VALUES (?, ?, 'PROJECT_CREATED', 'PROJECT', ?, ?)
-    `).run(req.user!.id, req.user!.full_name, projectId, `Création projet: ${title} (${cost} DZD, en attente 2e syndic)`);
+    await appendAuditLog(
+      req.user!.id,
+      req.user!.full_name,
+      'PROJECT_CREATED',
+      'PROJECT',
+      projectId,
+      { title, total_cost: cost, status: 'ACTIVE' }
+    );
 
-    const created = db.prepare('SELECT * FROM projects WHERE id = ?').get(projectId);
+    await appendSyncEvent('PROJECT', projectId, 'CREATED', {
+      id: projectId,
+      title,
+      total_cost: cost,
+      status: 'ACTIVE'
+    });
+
+    const created = (await query('SELECT * FROM projects WHERE id = $1', [projectId])).rows[0];
     res.status(201).json(created);
   });
 
-  app.post('/api/v1/projects/:id/approve', authMiddleware, syndicOnly, (req: AuthRequest, res) => {
-    const { id } = req.params;
-    const project = db.prepare('SELECT * FROM projects WHERE id = ?').get(id) as any;
-    if (!project) {
-      return res.status(404).json({ error: 'NOT_FOUND: Project does not exist' });
-    }
-
-    if (project.status !== 'PENDING_APPROVAL') {
-      return res.status(400).json({ error: 'BAD_REQUEST: Project is not pending approval' });
-    }
-
-    // MANDATORY CRITICAL INVARIANT: Creator cannot approve own project (Self-approval strictly prohibited)
-    if (project.creator_syndic_id === req.user!.id) {
-      return res.status(403).json({ error: 'ERR_SELF_APPROVAL_PROHIBITED: You cannot approve your own proposed project. The other Syndic must approve.' });
-    }
-
-    db.prepare(`
-      UPDATE projects 
-      SET approver_syndic_id = ?, status = 'APPROVED', approved_at = datetime('now')
-      WHERE id = ?
-    `).run(req.user!.id, id);
-
-    db.prepare(`
-      INSERT INTO audit_logs (actor_id, actor_name, action, entity_type, entity_id, details)
-      VALUES (?, ?, 'PROJECT_APPROVED', 'PROJECT', ?, ?)
-    `).run(req.user!.id, req.user!.full_name, id, `Projet approuvé par 2e syndic: ${project.title}`);
-
-    const updated = db.prepare('SELECT * FROM projects WHERE id = ?').get(id);
-    res.json(updated);
-  });
-
-  // 4. OWNER PAYMENT (Direct single-syndic recording, server assigns sequential ID, permanently locked)
-  app.post('/api/v1/ledger/payments', authMiddleware, syndicOnly, (req: AuthRequest, res) => {
+  // 4. OWNER PAYMENTS (Single Syndic records directly -> LOCKED, CREDIT, official balance updated)
+  app.post('/api/v1/ledger/payments', authMiddleware, syndicOnly, async (req: AuthRequest, res) => {
     const { apartment_number, project_id, amount, payment_method, idempotency_key } = req.body;
     if (!apartment_number || !project_id || !amount || Number(amount) <= 0 || !payment_method) {
       return res.status(400).json({ error: 'BAD_REQUEST: apartment_number, project_id, amount, and payment_method are required' });
     }
 
-    const key = idempotency_key || `key-${Date.now()}-${Math.random()}`;
+    const key = idempotency_key || crypto.randomUUID();
 
-    // Idempotency check: if key already exists, return existing record
-    const existing = db.prepare('SELECT * FROM financial_ledger WHERE idempotency_key = ?').get(key);
-    if (existing) {
-      return res.json(existing);
-    }
+    // Idempotency check with request_hash verification
+    const idempCheck = await handleIdempotency(key, req.user!.id, req.body, res);
+    if (idempCheck.handled) return;
 
-    const aptRow = db.prepare('SELECT * FROM apartments WHERE number = ?').get(apartment_number) as any;
-    if (!aptRow) {
+    const aptRes = await query('SELECT * FROM apartments WHERE apartment_number = $1', [apartment_number]);
+    if (aptRes.rows.length === 0) {
       return res.status(404).json({ error: 'NOT_FOUND: Apartment number invalid' });
     }
+    const apt = aptRes.rows[0];
 
-    const txId = getNextTxId();
+    const txId = crypto.randomUUID();
+    const seqId = await getNextTxId();
     const finalAmount = Math.floor(Number(amount));
 
-    db.prepare(`
-      INSERT INTO financial_ledger (
-        tx_id, type, project_id, apartment_number, owner_id, amount, 
-        payment_method, creator_syndic_id, approver_syndic_id, status, 
-        idempotency_key, created_at, approved_at
-      ) VALUES (?, 'OWNER_PAYMENT', ?, ?, ?, ?, ?, ?, ?, 'LOCKED', ?, datetime('now'), datetime('now'))
-    `).run(
-      txId,
-      project_id,
-      apartment_number,
-      aptRow.owner_id,
-      finalAmount,
-      payment_method,
+    try {
+      await query(`
+        INSERT INTO financial_transactions (
+          id, tx_seq_id, type, category, project_id, apartment_id, apartment_number,
+          amount, payment_method, created_by_syndic_id, status, is_correction,
+          idempotency_key
+        ) VALUES ($1, $2, 'CREDIT', 'COTISATION_PROJET', $3, $4, $5, $6, $7, $8, 'LOCKED', FALSE, $9)
+      `, [txId, seqId, project_id, apt.id, apartment_number, finalAmount, payment_method, req.user!.id, key]);
+    } catch (err: any) {
+      if (err.message && (err.message.includes('unique') || err.message.includes('idempotency_key') || err.code === '23505')) {
+        const existingTx = await query('SELECT * FROM financial_transactions WHERE idempotency_key = $1', [key]);
+        if (existingTx.rows.length > 0) {
+          const balanceInfo = await getOfficialBuildingBalance();
+          return res.status(200).json({
+            transaction: existingTx.rows[0],
+            official_balance: balanceInfo.official_balance,
+            total_credit: balanceInfo.total_credit,
+            total_debit: balanceInfo.total_debit
+          });
+        }
+      }
+      throw err;
+    }
+
+    await appendAuditLog(
       req.user!.id,
-      req.user!.id,
-      key
+      req.user!.full_name,
+      'PAYMENT_RECORDED',
+      'FINANCIAL_TRANSACTION',
+      seqId,
+      { apartment_number, amount: finalAmount, payment_method },
+      key,
+      req.ip
     );
 
-    db.prepare(`
-      INSERT INTO audit_logs (actor_id, actor_name, action, entity_type, entity_id, details)
-      VALUES (?, ?, 'PAYMENT_RECORDED', 'FINANCE', ?, ?)
-    `).run(req.user!.id, req.user!.full_name, txId, `Paiement enregistré: Appt ${apartment_number}, ${finalAmount} DZD (${payment_method})`);
+    await appendSyncEvent('FINANCIAL_TRANSACTION', seqId, 'PAYMENT_RECORDED', {
+      tx_seq_id: seqId,
+      apartment_number,
+      amount: finalAmount,
+      status: 'LOCKED'
+    });
 
-    const created = db.prepare('SELECT * FROM financial_ledger WHERE tx_id = ?').get(txId);
-    res.status(201).json(created);
+    const created = (await query('SELECT * FROM financial_transactions WHERE id = $1', [txId])).rows[0];
+    const balanceInfo = await getOfficialBuildingBalance();
+
+    const responsePayload = {
+      transaction: created,
+      official_balance: balanceInfo.official_balance,
+      total_credit: balanceInfo.total_credit,
+      total_debit: balanceInfo.total_debit
+    };
+
+    // Store in permanent idempotency table
+    await recordIdempotency(key, req.user!.id, req.body, 201, responsePayload);
+
+    res.status(201).json(responsePayload);
   });
 
-  // 5. EXPENSES (Requires Double Approval: Syndic A != Syndic B)
-  app.post('/api/v1/ledger/expenses', authMiddleware, syndicOnly, (req: AuthRequest, res) => {
-    const { amount, supplier, invoice_number, expense_category, description, idempotency_key } = req.body;
+  // 5. EXPENSES (Single Syndic records directly -> LOCKED, DEBIT, official balance updated)
+  app.post('/api/v1/ledger/expenses', authMiddleware, syndicOnly, async (req: AuthRequest, res) => {
+    const { amount, supplier, invoice_number, expense_category, description, idempotency_key, project_id } = req.body;
     if (!amount || Number(amount) <= 0 || !supplier || !expense_category) {
       return res.status(400).json({ error: 'BAD_REQUEST: amount, supplier, and expense_category are required' });
     }
 
-    const key = idempotency_key || `exp-key-${Date.now()}-${Math.random()}`;
-    const existing = db.prepare('SELECT * FROM financial_ledger WHERE idempotency_key = ?').get(key);
-    if (existing) return res.json(existing);
+    const key = idempotency_key || crypto.randomUUID();
 
-    const txId = getNextTxId();
+    // Idempotency check with request_hash verification
+    const idempCheck = await handleIdempotency(key, req.user!.id, req.body, res);
+    if (idempCheck.handled) return;
+
+    const txId = crypto.randomUUID();
+    const seqId = await getNextTxId();
     const finalAmount = Math.floor(Number(amount));
 
-    db.prepare(`
-      INSERT INTO financial_ledger (
-        tx_id, type, amount, payment_method, creator_syndic_id, 
-        status, supplier, invoice_number, expense_category, correction_reason, 
-        idempotency_key, created_at
-      ) VALUES (?, 'EXPENSE', ?, 'BANK_TRANSFER', ?, 'PENDING_APPROVAL', ?, ?, ?, ?, ?, datetime('now'))
-    `).run(
+    await query(`
+      INSERT INTO financial_transactions (
+        id, tx_seq_id, type, category, project_id, amount, payment_method,
+        created_by_syndic_id, status, is_correction, supplier, invoice_number,
+        description, idempotency_key
+      ) VALUES ($1, $2, 'DEBIT', $3, $4, $5, 'BANK_TRANSFER', $6, 'LOCKED', FALSE, $7, $8, $9, $10)
+    `, [
       txId,
+      seqId,
+      expense_category,
+      project_id || null,
       finalAmount,
       req.user!.id,
       supplier,
       invoice_number || null,
-      expense_category,
       description || null,
       key
+    ]);
+
+    await appendAuditLog(
+      req.user!.id,
+      req.user!.full_name,
+      'EXPENSE_RECORDED',
+      'FINANCIAL_TRANSACTION',
+      seqId,
+      { supplier, amount: finalAmount, category: expense_category },
+      key,
+      req.ip
     );
 
-    db.prepare(`
-      INSERT INTO audit_logs (actor_id, actor_name, action, entity_type, entity_id, details)
-      VALUES (?, ?, 'EXPENSE_CREATED', 'FINANCE', ?, ?)
-    `).run(req.user!.id, req.user!.full_name, txId, `Dépense proposée: ${supplier}, ${finalAmount} DZD (en attente 2e syndic)`);
+    await appendSyncEvent('FINANCIAL_TRANSACTION', seqId, 'EXPENSE_RECORDED', {
+      tx_seq_id: seqId,
+      supplier,
+      amount: finalAmount,
+      status: 'LOCKED'
+    });
 
-    const created = db.prepare('SELECT * FROM financial_ledger WHERE tx_id = ?').get(txId);
-    res.status(201).json(created);
+    const created = (await query('SELECT * FROM financial_transactions WHERE id = $1', [txId])).rows[0];
+    const balanceInfo = await getOfficialBuildingBalance();
+
+    const responsePayload = {
+      transaction: created,
+      official_balance: balanceInfo.official_balance,
+      total_credit: balanceInfo.total_credit,
+      total_debit: balanceInfo.total_debit
+    };
+
+    await recordIdempotency(key, req.user!.id, req.body, 201, responsePayload);
+    res.status(201).json(responsePayload);
   });
 
-  // 6. FINANCIAL CORRECTIONS (Requires Double Approval, parent remains untouched)
-  app.post('/api/v1/ledger/corrections', authMiddleware, syndicOnly, (req: AuthRequest, res) => {
-    const { original_tx_id, corrected_amount, correction_type, reason, idempotency_key } = req.body;
-    if (!original_tx_id || !corrected_amount || !reason || !correction_type) {
-      return res.status(400).json({ error: 'BAD_REQUEST: original_tx_id, corrected_amount, correction_type, and reason are required' });
+  // 6. COMPENSATING FINANCIAL CORRECTIONS (Creates NEW transaction referencing original_tx_id)
+  app.post('/api/v1/ledger/corrections', authMiddleware, syndicOnly, async (req: AuthRequest, res) => {
+    const { original_tx_id, amount, correction_type, reason, idempotency_key } = req.body;
+    if (!original_tx_id || !amount || Number(amount) <= 0 || !reason || !correction_type) {
+      return res.status(400).json({ error: 'BAD_REQUEST: original_tx_id, amount, correction_type, and reason are required' });
     }
 
-    const original = db.prepare('SELECT * FROM financial_ledger WHERE tx_id = ?').get(original_tx_id) as any;
-    if (!original) {
-      return res.status(404).json({ error: 'NOT_FOUND: Original transaction not found' });
+    if (!['CREDIT', 'DEBIT'].includes(correction_type)) {
+      return res.status(400).json({ error: 'BAD_REQUEST: correction_type must be CREDIT or DEBIT' });
     }
 
-    const key = idempotency_key || `corr-key-${Date.now()}-${Math.random()}`;
-    const existing = db.prepare('SELECT * FROM financial_ledger WHERE idempotency_key = ?').get(key);
-    if (existing) return res.json(existing);
+    const key = idempotency_key || crypto.randomUUID();
 
-    const txId = getNextTxId();
-    const finalAmount = Math.floor(Number(corrected_amount));
-    const ledgerType = correction_type === 'CREDIT' ? 'CORRECTION_CREDIT' : 'CORRECTION_DEBIT';
+    // Idempotency check with request_hash verification
+    const idempCheck = await handleIdempotency(key, req.user!.id, req.body, res);
+    if (idempCheck.handled) return;
 
-    db.prepare(`
-      INSERT INTO financial_ledger (
-        tx_id, type, project_id, apartment_number, owner_id, amount, 
-        payment_method, creator_syndic_id, status, original_tx_id, 
-        correction_reason, idempotency_key, created_at
-      ) VALUES (?, ?, ?, ?, ?, ?, 'BANK_TRANSFER', ?, 'PENDING_APPROVAL', ?, ?, ?, datetime('now'))
-    `).run(
-      txId,
-      ledgerType,
-      original.project_id,
-      original.apartment_number,
-      original.owner_id,
+    // Find original transaction by UUID or by sequential sequence ID
+    const origRes = await query(`
+      SELECT * FROM financial_transactions 
+      WHERE id::text = $1 OR tx_seq_id = $1
+    `, [original_tx_id]);
+
+    if (origRes.rows.length === 0) {
+      return res.status(404).json({ error: 'NOT_FOUND: Original financial transaction not found' });
+    }
+    const origTx = origRes.rows[0];
+
+    // Create a NEW compensating transaction referencing original_tx_id
+    // ORIGINAL TRANSACTION REMAINS UNTOUCHED AND LOCKED
+    const newTxId = crypto.randomUUID();
+    const newSeqId = await getNextTxId();
+    const finalAmount = Math.floor(Number(amount));
+
+    await query(`
+      INSERT INTO financial_transactions (
+        id, tx_seq_id, type, category, project_id, apartment_id, apartment_number,
+        amount, payment_method, created_by_syndic_id, status, is_correction,
+        original_tx_id, correction_reason, idempotency_key
+      ) VALUES ($1, $2, $3, 'CORRECTION', $4, $5, $6, $7, $8, $9, 'LOCKED', TRUE, $10, $11, $12)
+    `, [
+      newTxId,
+      newSeqId,
+      correction_type,
+      origTx.project_id,
+      origTx.apartment_id,
+      origTx.apartment_number,
       finalAmount,
+      origTx.payment_method,
       req.user!.id,
-      original_tx_id,
+      origTx.id,
       reason,
       key
+    ]);
+
+    await appendAuditLog(
+      req.user!.id,
+      req.user!.full_name,
+      'CORRECTION_ISSUED',
+      'FINANCIAL_TRANSACTION',
+      newSeqId,
+      { original_tx_id: origTx.tx_seq_id, amount: finalAmount, type: correction_type, reason },
+      key,
+      req.ip
     );
 
-    db.prepare(`
-      INSERT INTO audit_logs (actor_id, actor_name, action, entity_type, entity_id, details)
-      VALUES (?, ?, 'CORRECTION_REQUESTED', 'FINANCE', ?, ?)
-    `).run(req.user!.id, req.user!.full_name, txId, `Correction demandée sur ${original_tx_id}: ${finalAmount} DZD (${reason})`);
+    await appendSyncEvent('FINANCIAL_TRANSACTION', newSeqId, 'CORRECTION_ISSUED', {
+      tx_seq_id: newSeqId,
+      original_tx_id: origTx.tx_seq_id,
+      amount: finalAmount,
+      type: correction_type
+    });
 
-    const created = db.prepare('SELECT * FROM financial_ledger WHERE tx_id = ?').get(txId);
-    res.status(201).json(created);
+    const createdCorrection = (await query('SELECT * FROM financial_transactions WHERE id = $1', [newTxId])).rows[0];
+    const balanceInfo = await getOfficialBuildingBalance();
+
+    const responsePayload = {
+      correction_transaction: createdCorrection,
+      original_transaction: origTx,
+      official_balance: balanceInfo.official_balance,
+      total_credit: balanceInfo.total_credit,
+      total_debit: balanceInfo.total_debit
+    };
+
+    await recordIdempotency(key, req.user!.id, req.body, 201, responsePayload);
+    res.status(201).json(responsePayload);
   });
 
-  // Approve Expense or Correction (Double-approval invariant)
-  app.post('/api/v1/ledger/:txId/approve', authMiddleware, syndicOnly, (req: AuthRequest, res) => {
-    const { txId } = req.params;
-    const tx = db.prepare('SELECT * FROM financial_ledger WHERE tx_id = ?').get(txId) as any;
-    if (!tx) {
-      return res.status(404).json({ error: 'NOT_FOUND: Transaction does not exist' });
-    }
-
-    if (tx.status !== 'PENDING_APPROVAL') {
-      return res.status(400).json({ error: 'BAD_REQUEST: Transaction is not pending approval' });
-    }
-
-    // MANDATORY CRITICAL INVARIANT: Creator cannot approve own expense or correction
-    if (tx.creator_syndic_id === req.user!.id) {
-      return res.status(403).json({ error: 'ERR_SELF_APPROVAL_PROHIBITED: You cannot approve your own proposed transaction. The other Syndic must approve.' });
-    }
-
-    db.prepare(`
-      UPDATE financial_ledger 
-      SET approver_syndic_id = ?, status = 'LOCKED', approved_at = datetime('now')
-      WHERE tx_id = ?
-    `).run(req.user!.id, txId);
-
-    db.prepare(`
-      INSERT INTO audit_logs (actor_id, actor_name, action, entity_type, entity_id, details)
-      VALUES (?, ?, 'FINANCE_APPROVED', 'FINANCE', ?, ?)
-    `).run(req.user!.id, req.user!.full_name, txId, `Transaction ${txId} (${tx.type}) verrouillée et approuvée`);
-
-    const updated = db.prepare('SELECT * FROM financial_ledger WHERE tx_id = ?').get(txId);
-    res.json(updated);
+  // 7. STRICT IMMUTABILITY ENFORCEMENT ON FINANCIAL LEDGER
+  app.put('/api/v1/ledger/:id', authMiddleware, (req, res) => {
+    res.status(409).json({
+      error: 'ERR_LEDGER_IMMUTABLE',
+      message: 'Financial transactions are LOCKED and immutable. Direct updates are prohibited. Use compensating corrections instead.'
+    });
   });
 
-  // 7. IMMUTABILITY ENFORCEMENT: Direct update or delete is strictly rejected
-  app.put('/api/v1/ledger/:txId', authMiddleware, (req, res) => {
-    return res.status(409).json({ error: 'ERR_LEDGER_IMMUTABLE: Financial ledger transactions are immutable and cannot be updated. Use financial corrections instead.' });
+  app.delete('/api/v1/ledger/:id', authMiddleware, (req, res) => {
+    res.status(409).json({
+      error: 'ERR_LEDGER_IMMUTABLE',
+      message: 'Financial transactions are LOCKED and immutable. Direct deletions are prohibited.'
+    });
   });
 
-  app.delete('/api/v1/ledger/:txId', authMiddleware, (req, res) => {
-    return res.status(409).json({ error: 'ERR_LEDGER_IMMUTABLE: Financial ledger transactions are immutable and cannot be deleted.' });
-  });
-
-  // 8. AUTHORITATIVE LEDGER LIST & BALANCE
-  app.get('/api/v1/ledger', authMiddleware, (req, res) => {
-    const rows = db.prepare(`
+  // 8. AUTHORITATIVE LEDGER LIST & OFFICIAL BALANCE
+  app.get('/api/v1/ledger', authMiddleware, async (req, res) => {
+    const transactions = (await query(`
       SELECT 
-        l.*,
-        c.full_name as creator_name,
-        ap.full_name as approver_name
-      FROM financial_ledger l
-      JOIN users c ON l.creator_syndic_id = c.id
-      LEFT JOIN users ap ON l.approver_syndic_id = ap.id
-      ORDER BY l.created_at DESC
-    `).all();
+        t.*,
+        u.full_name as creator_name,
+        orig.tx_seq_id as original_tx_seq_id
+      FROM financial_transactions t
+      JOIN users u ON t.created_by_syndic_id = u.id
+      LEFT JOIN financial_transactions orig ON t.original_tx_id = orig.id
+      ORDER BY t.created_at DESC
+    `)).rows;
 
-    // Compute official server-authoritative balance:
-    // Balance = SUM(LOCKED Owner Payments) + SUM(LOCKED Correction Credits) - SUM(LOCKED Expenses) - SUM(LOCKED Correction Debits)
-    const stats = db.prepare(`
-      SELECT 
-        COALESCE(SUM(CASE WHEN type = 'OWNER_PAYMENT' AND status = 'LOCKED' THEN amount ELSE 0 END), 0) as total_payments,
-        COALESCE(SUM(CASE WHEN type = 'EXPENSE' AND status = 'LOCKED' THEN amount ELSE 0 END), 0) as total_expenses,
-        COALESCE(SUM(CASE WHEN type = 'CORRECTION_CREDIT' AND status = 'LOCKED' THEN amount ELSE 0 END), 0) as total_credits,
-        COALESCE(SUM(CASE WHEN type = 'CORRECTION_DEBIT' AND status = 'LOCKED' THEN amount ELSE 0 END), 0) as total_debits
-      FROM financial_ledger
-    `).get() as any;
-
-    const balance = (stats.total_payments + stats.total_credits) - (stats.total_expenses + stats.total_debits);
+    const balanceInfo = await getOfficialBuildingBalance();
 
     res.json({
-      transactions: rows,
-      authoritative_balance: balance,
-      total_collected: stats.total_payments + stats.total_credits,
-      total_spent: stats.total_expenses + stats.total_debits
+      transactions,
+      official_balance: balanceInfo.official_balance,
+      total_credit: balanceInfo.total_credit,
+      total_debit: balanceInfo.total_debit
     });
   });
 
   // 9. MAINTENANCE
-  app.get('/api/v1/maintenance', authMiddleware, (req, res) => {
-    const rows = db.prepare(`
+  app.get('/api/v1/maintenance', authMiddleware, async (req, res) => {
+    const rows = (await query(`
       SELECT m.*, u.full_name as reporter_name
       FROM maintenance_reports m
       JOIN users u ON m.reporter_id = u.id
       ORDER BY m.created_at DESC
-    `).all();
+    `)).rows;
     res.json(rows);
   });
 
-  app.post('/api/v1/maintenance', authMiddleware, (req: AuthRequest, res) => {
+  app.post('/api/v1/maintenance', authMiddleware, async (req: AuthRequest, res) => {
     const { category, description, photo_url } = req.body;
     if (!category || !description) {
       return res.status(400).json({ error: 'BAD_REQUEST: Category and description are required' });
     }
 
     const reportId = `REP-2026-${Date.now().toString().slice(-4)}`;
-    db.prepare(`
-      INSERT INTO maintenance_reports (id, apartment_number, reporter_id, category, description, photo_url, status)
-      VALUES (?, ?, ?, ?, ?, ?, 'NEW')
-    `).run(reportId, req.user!.apartment_number, req.user!.id, category, description, photo_url || null);
+    await query(`
+      INSERT INTO maintenance_reports (id, apartment_id, apartment_number, reporter_id, category, description, photo_url, status)
+      VALUES ($1, $2, $3, $4, $5, $6, $7, 'NEW')
+    `, [reportId, req.user!.apartment_id, req.user!.apartment_number, req.user!.id, category, description, photo_url || null]);
 
-    db.prepare(`
-      INSERT INTO audit_logs (actor_id, actor_name, action, entity_type, entity_id, details)
-      VALUES (?, ?, 'MAINTENANCE_CREATED', 'MAINTENANCE', ?, ?)
-    `).run(req.user!.id, req.user!.full_name, reportId, `Signalement panne: ${category}`);
+    await appendAuditLog(
+      req.user!.id,
+      req.user!.full_name,
+      'MAINTENANCE_REPORTED',
+      'MAINTENANCE',
+      reportId,
+      { category, apartment_number: req.user!.apartment_number }
+    );
 
-    const created = db.prepare('SELECT * FROM maintenance_reports WHERE id = ?').get(reportId);
+    await appendSyncEvent('MAINTENANCE', reportId, 'CREATED', {
+      id: reportId,
+      category,
+      apartment_number: req.user!.apartment_number,
+      status: 'NEW'
+    });
+
+    const created = (await query('SELECT * FROM maintenance_reports WHERE id = $1', [reportId])).rows[0];
     res.status(201).json(created);
   });
 
-  app.put('/api/v1/maintenance/:id/status', authMiddleware, syndicOnly, (req: AuthRequest, res) => {
+  app.put('/api/v1/maintenance/:id/status', authMiddleware, syndicOnly, async (req: AuthRequest, res) => {
     const { id } = req.params;
     const { status, notes } = req.body;
     if (!['NEW', 'IN_PROGRESS', 'RESOLVED'].includes(status)) {
-      return res.status(400).json({ error: 'BAD_REQUEST: Invalid status' });
+      return res.status(400).json({ error: 'BAD_REQUEST: Status must be NEW, IN_PROGRESS, or RESOLVED' });
     }
 
-    db.prepare(`
+    await query(`
       UPDATE maintenance_reports 
-      SET status = ?, syndic_notes = ?, updated_at = datetime('now')
-      WHERE id = ?
-    `).run(status, notes || null, id);
+      SET status = $1, syndic_notes = $2, updated_at = NOW()
+      WHERE id = $3
+    `, [status, notes || null, id]);
 
-    const updated = db.prepare('SELECT * FROM maintenance_reports WHERE id = ?').get(id);
+    await appendAuditLog(
+      req.user!.id,
+      req.user!.full_name,
+      'MAINTENANCE_STATUS_UPDATED',
+      'MAINTENANCE',
+      id,
+      { status, notes }
+    );
+
+    const updated = (await query('SELECT * FROM maintenance_reports WHERE id = $1', [id])).rows[0];
     res.json(updated);
   });
 
   // 10. ELEVATOR
-  app.get('/api/v1/elevator', authMiddleware, (req, res) => {
-    const records = db.prepare('SELECT * FROM elevator_records ORDER BY maintenance_date DESC').all();
-    res.json(records);
+  app.get('/api/v1/elevator', authMiddleware, async (req, res) => {
+    const rows = (await query('SELECT * FROM elevator_records ORDER BY maintenance_date DESC')).rows;
+    res.json(rows);
   });
 
   // 11. ANNOUNCEMENTS & MEETINGS
-  app.get('/api/v1/announcements', authMiddleware, (req, res) => {
-    const rows = db.prepare(`
+  app.get('/api/v1/announcements', authMiddleware, async (req, res) => {
+    const rows = (await query(`
       SELECT a.*, u.full_name as creator_name
       FROM announcements a
-      JOIN users u ON a.creator_syndic_id = u.id
+      JOIN users u ON a.created_by_syndic_id = u.id
       ORDER BY a.created_at DESC
-    `).all();
+    `)).rows;
     res.json(rows);
   });
 
-  app.post('/api/v1/announcements', authMiddleware, syndicOnly, (req: AuthRequest, res) => {
+  app.post('/api/v1/announcements', authMiddleware, syndicOnly, async (req: AuthRequest, res) => {
     const { title, content, priority } = req.body;
     if (!title || !content) return res.status(400).json({ error: 'Title and content required' });
+
     const annId = `ANN-${Date.now().toString().slice(-4)}`;
-    db.prepare('INSERT INTO announcements (id, title, content, priority, creator_syndic_id) VALUES (?, ?, ?, ?, ?)')
-      .run(annId, title, content, priority || 'NORMAL', req.user!.id);
-    res.status(201).json(db.prepare('SELECT * FROM announcements WHERE id = ?').get(annId));
+    await query(`
+      INSERT INTO announcements (id, title, content, priority, created_by_syndic_id)
+      VALUES ($1, $2, $3, $4, $5)
+    `, [annId, title, content, priority || 'NORMAL', req.user!.id]);
+
+    const created = (await query('SELECT * FROM announcements WHERE id = $1', [annId])).rows[0];
+    res.status(201).json(created);
   });
 
-  app.get('/api/v1/meetings', authMiddleware, (req, res) => {
-    const rows = db.prepare('SELECT * FROM meetings ORDER BY meeting_date DESC').all();
+  app.get('/api/v1/meetings', authMiddleware, async (req, res) => {
+    const rows = (await query('SELECT * FROM meetings ORDER BY meeting_date DESC')).rows;
     res.json(rows);
   });
 
-  // 12. VOTING (Public & Non-Anonymous, exactly 1 vote per apartment)
-  app.get('/api/v1/voting', authMiddleware, (req, res) => {
-    const sessions = db.prepare('SELECT * FROM voting_sessions ORDER BY created_at DESC').all() as any[];
-    const result = sessions.map(session => {
-      const votes = db.prepare(`
+  // 12. GENERAL ASSEMBLY VOTING (Exactly 1 vote per apartment)
+  app.get('/api/v1/voting', authMiddleware, async (req, res) => {
+    const sessions = (await query('SELECT * FROM voting_sessions ORDER BY created_at DESC')).rows;
+    const result: any[] = [];
+
+    for (const s of sessions) {
+      const votes = (await query(`
         SELECT v.*, u.full_name as owner_name
         FROM votes v
         JOIN users u ON v.owner_id = u.id
-        WHERE v.session_id = ?
+        WHERE v.session_id = $1
         ORDER BY v.apartment_number ASC
-      `).all(session.id);
-      return { ...session, votes };
-    });
+      `, [s.id])).rows;
+
+      result.push({
+        ...s,
+        votes
+      });
+    }
+
     res.json(result);
   });
 
-  app.post('/api/v1/voting/:id/vote', authMiddleware, (req: AuthRequest, res) => {
+  app.post('/api/v1/voting/:id/vote', authMiddleware, async (req: AuthRequest, res) => {
     const { id } = req.params;
     const { choice } = req.body;
     if (!['YES', 'NO', 'ABSTAIN'].includes(choice)) {
@@ -536,33 +691,67 @@ export function createApp() {
     }
 
     try {
-      db.prepare(`
-        INSERT INTO votes (session_id, apartment_number, owner_id, choice, cast_at)
-        VALUES (?, ?, ?, ?, datetime('now'))
-      `).run(id, req.user!.apartment_number, req.user!.id, choice);
+      await query(`
+        INSERT INTO votes (session_id, apartment_id, apartment_number, owner_id, choice)
+        VALUES ($1, $2, $3, $4, $5)
+      `, [id, req.user!.apartment_id, req.user!.apartment_number, req.user!.id, choice]);
 
-      db.prepare(`
-        INSERT INTO audit_logs (actor_id, actor_name, action, entity_type, entity_id, details)
-        VALUES (?, ?, 'VOTE_CAST', 'VOTING', ?, ?)
-      `).run(req.user!.id, req.user!.full_name, id, `Vote public enregistré: Appt ${req.user!.apartment_number} = ${choice}`);
+      await appendAuditLog(
+        req.user!.id,
+        req.user!.full_name,
+        'VOTE_CAST',
+        'VOTING',
+        id,
+        { apartment_number: req.user!.apartment_number, choice }
+      );
 
-      res.status(201).json({ success: true, choice });
+      res.status(201).json({ success: true, choice, apartment_number: req.user!.apartment_number });
     } catch (err: any) {
-      if (err.message && err.message.includes('UNIQUE constraint failed')) {
-        return res.status(409).json({ error: 'CONFLICT: Apartment has already cast a vote for this session. Votes cannot be changed.' });
+      if (err.message && (err.message.includes('unique') || err.message.includes('UNIQUE'))) {
+        return res.status(409).json({ error: 'CONFLICT: Apartment has already cast a vote for this session. Exactly 1 vote per apartment is permitted.' });
       }
       return res.status(500).json({ error: err.message });
     }
   });
 
-  // 13. AUDIT LOGS
-  app.get('/api/v1/audit-logs', authMiddleware, (req, res) => {
-    const logs = db.prepare('SELECT * FROM audit_logs ORDER BY timestamp DESC LIMIT 100').all();
+  // 13. IMMUTABLE AUDIT LOGS
+  app.get('/api/v1/audit-logs', authMiddleware, async (req, res) => {
+    const logs = (await query('SELECT * FROM audit_logs ORDER BY created_at DESC LIMIT 100')).rows;
     res.json(logs);
   });
 
-  // 14. SYNC PUSH (Batch upload for offline queued items)
-  app.post('/api/v1/sync/push', authMiddleware, (req: AuthRequest, res) => {
+  app.put('/api/v1/audit-logs/:id', authMiddleware, (req, res) => {
+    res.status(409).json({ error: 'ERR_AUDIT_IMMUTABLE: Audit logs are strictly append-only and cannot be modified.' });
+  });
+
+  app.delete('/api/v1/audit-logs/:id', authMiddleware, (req, res) => {
+    res.status(409).json({ error: 'ERR_AUDIT_IMMUTABLE: Audit logs are strictly append-only and cannot be deleted.' });
+  });
+
+  // 14. MONOTONIC SYNC CURSOR ENGINE
+  // Pull sync using monotonic server-side cursor to resume without missing records
+  app.get('/api/v1/sync/pull', authMiddleware, async (req, res) => {
+    const cursor = Number(req.query.cursor || 0);
+
+    const eventsRes = await query(`
+      SELECT * FROM sync_events 
+      WHERE cursor_id > $1 
+      ORDER BY cursor_id ASC 
+      LIMIT 200
+    `, [cursor]);
+
+    const maxCursorRes = await query('SELECT COALESCE(MAX(cursor_id), 0) as max_cursor FROM sync_events');
+    const currentCursor = Number(maxCursorRes.rows[0].max_cursor);
+
+    res.json({
+      events: eventsRes.rows,
+      current_cursor: currentCursor,
+      has_more: eventsRes.rows.length === 200
+    });
+  });
+
+  // Push sync: Upload offline queued records with client-generated idempotency keys
+  app.post('/api/v1/sync/push', authMiddleware, async (req: AuthRequest, res) => {
     const { items } = req.body;
     if (!Array.isArray(items)) {
       return res.status(400).json({ error: 'BAD_REQUEST: items array expected' });
@@ -573,47 +762,82 @@ export function createApp() {
       try {
         if (item.type === 'MAINTENANCE') {
           const reportId = `REP-2026-${Date.now().toString().slice(-4)}`;
-          db.prepare(`
-            INSERT INTO maintenance_reports (id, apartment_number, reporter_id, category, description, photo_url, status)
-            VALUES (?, ?, ?, ?, ?, ?, 'NEW')
-          `).run(reportId, req.user!.apartment_number, req.user!.id, item.category, item.description, item.photo_url || null);
+          await query(`
+            INSERT INTO maintenance_reports (id, apartment_id, apartment_number, reporter_id, category, description, photo_url, status)
+            VALUES ($1, $2, $3, $4, $5, $6, $7, 'NEW')
+          `, [reportId, req.user!.apartment_id, req.user!.apartment_number, req.user!.id, item.category, item.description, item.photo_url || null]);
+
+          await appendSyncEvent('MAINTENANCE', reportId, 'CREATED', {
+            id: reportId,
+            category: item.category,
+            apartment_number: req.user!.apartment_number
+          });
+
           results.push({ local_id: item.local_id, server_id: reportId, status: 'SYNCED' });
-        } else if (item.type === 'PAYMENT' && req.user!.role === 'OWNER_SYNDIC') {
-          const txId = getNextTxId();
-          const aptRow = db.prepare('SELECT * FROM apartments WHERE number = ?').get(item.apartment_number) as any;
-          db.prepare(`
-            INSERT INTO financial_ledger (
-              tx_id, type, project_id, apartment_number, owner_id, amount, 
-              payment_method, creator_syndic_id, approver_syndic_id, status, 
-              idempotency_key, created_at, approved_at
-            ) VALUES (?, 'OWNER_PAYMENT', ?, ?, ?, ?, ?, ?, ?, 'LOCKED', ?, datetime('now'), datetime('now'))
-          `).run(
-            txId,
-            item.project_id,
-            item.apartment_number,
-            aptRow.owner_id,
-            Math.floor(item.amount),
-            item.payment_method || 'CASH',
-            req.user!.id,
-            req.user!.id,
-            item.idempotency_key || `sync-${Date.now()}`
-          );
-          results.push({ local_id: item.local_id, server_id: txId, status: 'LOCKED' });
+        } else if (item.type === 'PAYMENT' && req.user!.role === 'SYNDIC') {
+          const key = item.idempotency_key || crypto.randomUUID();
+          const hash = crypto.createHash('sha256').update(JSON.stringify(item)).digest('hex');
+
+          // Check if already processed
+          const existingKeyRes = await query('SELECT * FROM idempotency_keys WHERE key = $1', [key]);
+          if (existingKeyRes.rows.length > 0) {
+            results.push({
+              local_id: item.local_id,
+              server_id: existingKeyRes.rows[0].response_body.transaction?.tx_seq_id,
+              status: 'LOCKED',
+              message: 'Already recorded idempotently'
+            });
+            continue;
+          }
+
+          const aptRes = await query('SELECT * FROM apartments WHERE apartment_number = $1', [item.apartment_number]);
+          if (aptRes.rows.length === 0) throw new Error('Apartment not found');
+
+          const txId = crypto.randomUUID();
+          const seqId = await getNextTxId();
+          const finalAmount = Math.floor(Number(item.amount));
+
+          await query(`
+            INSERT INTO financial_transactions (
+              id, tx_seq_id, type, category, project_id, apartment_id, apartment_number,
+              amount, payment_method, created_by_syndic_id, status, is_correction,
+              idempotency_key
+            ) VALUES ($1, $2, 'CREDIT', 'COTISATION_PROJET', $3, $4, $5, $6, $7, $8, 'LOCKED', FALSE, $9)
+          `, [txId, seqId, item.project_id, aptRes.rows[0].id, item.apartment_number, finalAmount, item.payment_method || 'CASH', req.user!.id, key]);
+
+          await appendSyncEvent('FINANCIAL_TRANSACTION', seqId, 'PAYMENT_RECORDED', {
+            tx_seq_id: seqId,
+            apartment_number: item.apartment_number,
+            amount: finalAmount,
+            status: 'LOCKED'
+          });
+
+          const createdTx = (await query('SELECT * FROM financial_transactions WHERE id = $1', [txId])).rows[0];
+          await recordIdempotency(key, req.user!.id, item, 201, { transaction: createdTx });
+
+          results.push({ local_id: item.local_id, server_id: seqId, status: 'LOCKED' });
         }
       } catch (err: any) {
         results.push({ local_id: item.local_id, error: err.message, status: 'FAILED' });
       }
     }
 
-    res.json({ synced: results, server_time: new Date().toISOString() });
+    const balanceInfo = await getOfficialBuildingBalance();
+    res.json({
+      synced: results,
+      official_balance: balanceInfo.official_balance,
+      server_time: new Date().toISOString()
+    });
   });
 
   return app;
 }
 
 if (require.main === module) {
-  const app = createApp();
-  app.listen(PORT, () => {
-    console.log(`Amarati Central Backend running on port ${PORT}`);
+  initDatabase().then(() => {
+    const app = createApp();
+    app.listen(PORT, () => {
+      console.log(`Amarati Authoritative Central Backend running on port ${PORT}`);
+    });
   });
 }

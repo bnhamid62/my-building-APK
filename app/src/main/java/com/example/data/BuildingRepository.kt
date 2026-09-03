@@ -67,8 +67,9 @@ class BuildingRepository(val dao: BuildingDao) {
             val name = ownerNames[i - 1]
             val floor = (i - 1) / 4 // Floors 0 to 9 (4 apartments per floor)
             val username = "apt$i"
-            val isSyndic = (i == 1 || i == 2)
-            val role = if (isSyndic) "OWNER_SYNDIC" else "OWNER"
+            val isSyndic = (i == 1) // Exactly ONE Syndic: Apt 1 (Ahmed Benali)
+            val role = if (isSyndic) "SYNDIC" else "OWNER"
+            val fullName = if (isSyndic) "Ahmed Benali (Syndic)" else name
             val phone = "0550${100000 + i}"
 
             userEntities.add(
@@ -76,7 +77,7 @@ class BuildingRepository(val dao: BuildingDao) {
                     id = i.toLong(),
                     username = username,
                     passwordHash = "amarati123", // standard initial password for all apartments
-                    fullName = name,
+                    fullName = fullName,
                     phoneNumber = phone,
                     role = role,
                     apartmentNumber = i,
@@ -89,7 +90,7 @@ class BuildingRepository(val dao: BuildingDao) {
                     number = i,
                     floor = floor,
                     ownerId = i.toLong(),
-                    ownerName = name,
+                    ownerName = fullName,
                     ownerPhone = phone
                 )
             )
@@ -98,7 +99,7 @@ class BuildingRepository(val dao: BuildingDao) {
         dao.insertUsers(userEntities)
         dao.insertApartments(apartmentEntities)
 
-        // Seed Project 1: Elevator Maintenance & Modernization
+        // Seed Project 1: Elevator Maintenance & Modernization (Directly ACTIVE by Single Syndic)
         val p1Id = "PRJ-2026-001"
         dao.insertProject(
             ProjectEntity(
@@ -109,17 +110,13 @@ class BuildingRepository(val dao: BuildingDao) {
                 apartmentCount = 40,
                 contributionPerApt = 5000L,
                 creatorSyndicId = 1L,
-                creatorName = "Ahmed Benali (Syndic 1)",
-                approverSyndicId = 2L,
-                approverName = "Karim Mansouri (Syndic 2)",
-                status = "APPROVED",
-                rejectionReason = null,
-                createdAt = System.currentTimeMillis() - (15L * 24 * 3600 * 1000),
-                approvedAt = System.currentTimeMillis() - (14L * 24 * 3600 * 1000)
+                creatorName = "Ahmed Benali (Syndic)",
+                status = "ACTIVE",
+                createdAt = System.currentTimeMillis() - (15L * 24 * 3600 * 1000)
             )
         )
 
-        // Seed Project 2: Staircase Painting & LED Lighting
+        // Seed Project 2: Staircase Painting & LED Lighting (Directly ACTIVE by Single Syndic)
         val p2Id = "PRJ-2026-002"
         dao.insertProject(
             ProjectEntity(
@@ -129,14 +126,10 @@ class BuildingRepository(val dao: BuildingDao) {
                 totalCost = 120000L,
                 apartmentCount = 40,
                 contributionPerApt = 3000L,
-                creatorSyndicId = 2L,
-                creatorName = "Karim Mansouri (Syndic 2)",
-                approverSyndicId = 1L,
-                approverName = "Ahmed Benali (Syndic 1)",
-                status = "APPROVED",
-                rejectionReason = null,
-                createdAt = System.currentTimeMillis() - (7L * 24 * 3600 * 1000),
-                approvedAt = System.currentTimeMillis() - (6L * 24 * 3600 * 1000)
+                creatorSyndicId = 1L,
+                creatorName = "Ahmed Benali (Syndic)",
+                status = "ACTIVE",
+                createdAt = System.currentTimeMillis() - (7L * 24 * 3600 * 1000)
             )
         )
 
@@ -153,27 +146,25 @@ class BuildingRepository(val dao: BuildingDao) {
                     projectTitle = "Réparation et Modernisation de l'Ascenseur",
                     apartmentNumber = apt,
                     ownerId = apt.toLong(),
-                    ownerName = ownerNames[apt - 1],
+                    ownerName = if (apt == 1) "Ahmed Benali (Syndic)" else ownerNames[apt - 1],
                     amount = 5000L,
                     paymentMethod = if (apt % 2 == 0) "CASH" else "BANK_TRANSFER",
-                    creatorSyndicId = if (apt % 2 == 0) 1L else 2L,
-                    creatorName = if (apt % 2 == 0) "Ahmed Benali" else "Karim Mansouri",
-                    approverSyndicId = null,
-                    approverName = null,
+                    creatorSyndicId = 1L,
+                    creatorName = "Ahmed Benali (Syndic)",
                     status = "LOCKED",
+                    isCorrection = false,
                     originalTxId = null,
                     correctionReason = null,
                     supplier = null,
                     invoiceNumber = null,
                     expenseCategory = null,
                     createdAt = System.currentTimeMillis() - ((30 - apt) * 12L * 3600 * 1000),
-                    approvedAt = System.currentTimeMillis() - ((30 - apt) * 12L * 3600 * 1000),
                     isPendingSync = false
                 )
             )
         }
 
-        // Seed Locked Approved Expense 1
+        // Seed Locked Expense 1 (Directly recorded by Single Syndic)
         txCounter++
         dao.insertLedgerEntry(
             LedgerEntity(
@@ -187,17 +178,15 @@ class BuildingRepository(val dao: BuildingDao) {
                 amount = 45000L,
                 paymentMethod = "BANK_TRANSFER",
                 creatorSyndicId = 1L,
-                creatorName = "Ahmed Benali",
-                approverSyndicId = 2L,
-                approverName = "Karim Mansouri",
+                creatorName = "Ahmed Benali (Syndic)",
                 status = "LOCKED",
+                isCorrection = false,
                 originalTxId = null,
                 correctionReason = null,
                 supplier = "SARL Ascenseurs d'Alger",
                 invoiceNumber = "FAC-2026-088",
                 expenseCategory = "Ascenseur",
                 createdAt = System.currentTimeMillis() - (5L * 24 * 3600 * 1000),
-                approvedAt = System.currentTimeMillis() - (4L * 24 * 3600 * 1000),
                 isPendingSync = false
             )
         )
@@ -384,8 +373,8 @@ class BuildingRepository(val dao: BuildingDao) {
         totalCost: Long,
         creator: User
     ): Result<String> {
-        if (creator.role != UserRole.OWNER_SYNDIC) {
-            return Result.failure(IllegalStateException("Seul un syndic peut créer un projet financier."))
+        if (creator.role != UserRole.SYNDIC) {
+            return Result.failure(IllegalStateException("Seul le syndic peut créer un projet financier."))
         }
         val id = "PRJ-${SimpleDateFormat("yyyy", Locale.US).format(Date())}-${UUID.randomUUID().toString().take(6).uppercase(Locale.US)}"
         val entity = ProjectEntity(
@@ -397,12 +386,8 @@ class BuildingRepository(val dao: BuildingDao) {
             contributionPerApt = totalCost / 40,
             creatorSyndicId = creator.id,
             creatorName = creator.fullName,
-            approverSyndicId = null,
-            approverName = null,
-            status = "PENDING_APPROVAL",
-            rejectionReason = null,
-            createdAt = System.currentTimeMillis(),
-            approvedAt = null
+            status = "ACTIVE",
+            createdAt = System.currentTimeMillis()
         )
         dao.insertProject(entity)
 
@@ -412,53 +397,14 @@ class BuildingRepository(val dao: BuildingDao) {
                 action = "CREATE_PROJECT",
                 entityType = "PROJECT",
                 entityId = id,
-                details = "Création du projet: $title ($totalCost DZD) - En attente d'approbation du 2ème syndic.",
+                details = "Création du projet direct par le syndic: $title ($totalCost DZD). Statut: ACTIVE.",
                 timestamp = System.currentTimeMillis()
             )
         )
         return Result.success(id)
     }
 
-    suspend fun approveFinancialProject(
-        projectId: String,
-        approver: User,
-        approve: Boolean,
-        reason: String? = null
-    ): Result<Unit> {
-        if (approver.role != UserRole.OWNER_SYNDIC) {
-            return Result.failure(IllegalStateException("Seul un syndic peut approuver un projet."))
-        }
-        val project = dao.getProjectById(projectId)
-            ?: return Result.failure(IllegalArgumentException("Projet introuvable."))
-
-        // CRITICAL BUSINESS RULE: A Syndic CANNOT approve their own request!
-        if (project.creatorSyndicId == approver.id) {
-            return Result.failure(IllegalStateException("Règle de sécurité : Un syndic ne peut pas approuver son propre projet. L'approbation du second syndic est obligatoire."))
-        }
-
-        val updated = project.copy(
-            approverSyndicId = approver.id,
-            approverName = approver.fullName,
-            status = if (approve) "APPROVED" else "REJECTED",
-            rejectionReason = if (!approve) reason else null,
-            approvedAt = if (approve) System.currentTimeMillis() else null
-        )
-        dao.updateProject(updated)
-
-        dao.insertAuditLog(
-            AuditLogEntity(
-                actorName = approver.fullName,
-                action = if (approve) "APPROVE_PROJECT" else "REJECT_PROJECT",
-                entityType = "PROJECT",
-                entityId = projectId,
-                details = if (approve) "Approbation du projet par le 2ème syndic." else "Rejet du projet: $reason",
-                timestamp = System.currentTimeMillis()
-            )
-        )
-        return Result.success(Unit)
-    }
-
-    // --- Financial Ledger & Double Approval for Expenses ---
+    // --- Financial Ledger (Single-Syndic Authoritative Model) ---
     fun getAllLedgerFlow(): Flow<List<FinancialLedgerEntry>> = dao.getAllLedgerFlow().map { list ->
         list.map { it.toFinancialLedgerEntry() }
     }
@@ -467,7 +413,7 @@ class BuildingRepository(val dao: BuildingDao) {
         list.map { it.toFinancialLedgerEntry() }
     }
 
-    fun getPendingApprovalLedgerFlow(): Flow<List<FinancialLedgerEntry>> = dao.getPendingApprovalLedgerFlow().map { list ->
+    fun getPendingSyncLedgerFlow(): Flow<List<FinancialLedgerEntry>> = dao.getPendingSyncLedgerFlow().map { list ->
         list.map { it.toFinancialLedgerEntry() }
     }
 
@@ -476,8 +422,8 @@ class BuildingRepository(val dao: BuildingDao) {
     }
 
     /**
-     * OWNER PAYMENT: Recorded directly by a Syndic.
-     * Does NOT require double approval. Becomes LOCKED immediately.
+     * OWNER PAYMENT: Recorded directly by the Single Syndic.
+     * Becomes LOCKED immediately in the ledger.
      */
     suspend fun recordOwnerPayment(
         projectId: String,
@@ -490,8 +436,8 @@ class BuildingRepository(val dao: BuildingDao) {
         recorder: User,
         isOffline: Boolean = false
     ): Result<String> {
-        if (recorder.role != UserRole.OWNER_SYNDIC) {
-            return Result.failure(IllegalStateException("Seul un syndic peut enregistrer un paiement."))
+        if (recorder.role != UserRole.SYNDIC) {
+            return Result.failure(IllegalStateException("Seul le syndic peut enregistrer un paiement."))
         }
         val txYear = SimpleDateFormat("yyyy", Locale.US).format(Date())
         val randomSuffix = String.format(Locale.US, "%06d", (100000..999999).random())
@@ -509,16 +455,14 @@ class BuildingRepository(val dao: BuildingDao) {
             paymentMethod = paymentMethod.name,
             creatorSyndicId = recorder.id,
             creatorName = recorder.fullName,
-            approverSyndicId = null,
-            approverName = null,
             status = "LOCKED",
+            isCorrection = false,
             originalTxId = null,
             correctionReason = null,
             supplier = null,
             invoiceNumber = null,
             expenseCategory = null,
             createdAt = System.currentTimeMillis(),
-            approvedAt = System.currentTimeMillis(),
             isPendingSync = isOffline
         )
         dao.insertLedgerEntry(entity)
@@ -537,7 +481,8 @@ class BuildingRepository(val dao: BuildingDao) {
     }
 
     /**
-     * EXPENSE: Requires double approval from the second Syndic before becoming LOCKED.
+     * EXPENSE: Recorded directly by the Single Syndic.
+     * Becomes LOCKED immediately in the ledger.
      */
     suspend fun createExpense(
         projectId: String?,
@@ -550,8 +495,8 @@ class BuildingRepository(val dao: BuildingDao) {
         paymentMethod: PaymentMethod,
         creator: User
     ): Result<String> {
-        if (creator.role != UserRole.OWNER_SYNDIC) {
-            return Result.failure(IllegalStateException("Seul un syndic peut créer une dépense."))
+        if (creator.role != UserRole.SYNDIC) {
+            return Result.failure(IllegalStateException("Seul le syndic peut enregistrer une dépense."))
         }
         val txYear = SimpleDateFormat("yyyy", Locale.US).format(Date())
         val randomSuffix = String.format(Locale.US, "%06d", (100000..999999).random())
@@ -569,16 +514,14 @@ class BuildingRepository(val dao: BuildingDao) {
             paymentMethod = paymentMethod.name,
             creatorSyndicId = creator.id,
             creatorName = creator.fullName,
-            approverSyndicId = null,
-            approverName = null,
-            status = "PENDING_APPROVAL",
+            status = "LOCKED",
+            isCorrection = false,
             originalTxId = null,
             correctionReason = null,
             supplier = supplier,
             invoiceNumber = invoiceNumber,
             expenseCategory = category,
             createdAt = System.currentTimeMillis(),
-            approvedAt = null,
             isPendingSync = false
         )
         dao.insertLedgerEntry(entity)
@@ -589,71 +532,31 @@ class BuildingRepository(val dao: BuildingDao) {
                 action = "CREATE_EXPENSE",
                 entityType = "TRANSACTION",
                 entityId = txId,
-                details = "Dépense créée: $supplier ($amount DZD, Facture: $invoiceNumber) - En attente d'approbation du 2ème syndic.",
+                details = "Dépense enregistrée directement par le syndic: $supplier ($amount DZD, Facture: $invoiceNumber). Verrouillée immédiatement.",
                 timestamp = System.currentTimeMillis()
             )
         )
         return Result.success(txId)
     }
 
-    suspend fun approveExpense(
-        txId: String,
-        approver: User,
-        approve: Boolean,
-        rejectionReason: String? = null
-    ): Result<Unit> {
-        if (approver.role != UserRole.OWNER_SYNDIC) {
-            return Result.failure(IllegalStateException("Seul un syndic peut approuver une dépense."))
-        }
-        val entry = dao.getLedgerEntryById(txId)
-            ?: return Result.failure(IllegalArgumentException("Dépense introuvable."))
-
-        // CRITICAL: Cannot approve self-created expense!
-        if (entry.creatorSyndicId == approver.id) {
-            return Result.failure(IllegalStateException("Règle de sécurité : Un syndic ne peut pas approuver sa propre dépense. L'approbation du second syndic est obligatoire."))
-        }
-
-        val updated = entry.copy(
-            approverSyndicId = approver.id,
-            approverName = approver.fullName,
-            status = if (approve) "LOCKED" else "REJECTED",
-            correctionReason = if (!approve) rejectionReason else entry.correctionReason,
-            approvedAt = if (approve) System.currentTimeMillis() else null
-        )
-        dao.updateLedgerEntry(updated)
-
-        dao.insertAuditLog(
-            AuditLogEntity(
-                actorName = approver.fullName,
-                action = if (approve) "APPROVE_EXPENSE" else "REJECT_EXPENSE",
-                entityType = "TRANSACTION",
-                entityId = txId,
-                details = if (approve) "Dépense $txId approuvée et verrouillée." else "Dépense $txId rejetée: $rejectionReason",
-                timestamp = System.currentTimeMillis()
-            )
-        )
-        return Result.success(Unit)
-    }
-
     /**
      * FINANCIAL CORRECTION: Original transaction is NEVER edited or deleted.
-     * Syndic 1 requests correction, Syndic 2 approves it.
-     * When approved, creates a brand new CORRECTION transaction referencing originalTxId.
+     * The Single Syndic creates a new compensating transaction referencing originalTxId.
      */
-    suspend fun requestFinancialCorrection(
+    suspend fun recordFinancialCorrection(
         originalTxId: String,
-        newAmount: Long,
+        correctionDelta: Long,
+        isDebit: Boolean,
         reason: String,
-        requester: User
+        syndic: User
     ): Result<String> {
-        if (requester.role != UserRole.OWNER_SYNDIC) {
-            return Result.failure(IllegalStateException("Seul un syndic peut demander une correction."))
+        if (syndic.role != UserRole.SYNDIC) {
+            return Result.failure(IllegalStateException("Seul le syndic peut enregistrer une correction."))
         }
         val original = dao.getLedgerEntryById(originalTxId)
             ?: return Result.failure(IllegalArgumentException("Transaction originale introuvable."))
 
-        val delta = newAmount - original.amount
-        val correctionType = if (delta > 0) "CORRECTION_DEBIT" else "CORRECTION_CREDIT"
+        val correctionType = if (isDebit) "CORRECTION_DEBIT" else "CORRECTION_CREDIT"
         val txYear = SimpleDateFormat("yyyy", Locale.US).format(Date())
         val randomSuffix = String.format(Locale.US, "%06d", (100000..999999).random())
         val corrTxId = "TX-$txYear-$randomSuffix"
@@ -666,73 +569,33 @@ class BuildingRepository(val dao: BuildingDao) {
             apartmentNumber = original.apartmentNumber,
             ownerId = original.ownerId,
             ownerName = original.ownerName,
-            amount = kotlin.math.abs(delta),
+            amount = kotlin.math.abs(correctionDelta),
             paymentMethod = original.paymentMethod,
-            creatorSyndicId = requester.id,
-            creatorName = requester.fullName,
-            approverSyndicId = null,
-            approverName = null,
-            status = "PENDING_APPROVAL",
+            creatorSyndicId = syndic.id,
+            creatorName = syndic.fullName,
+            status = "LOCKED",
+            isCorrection = true,
             originalTxId = originalTxId,
             correctionReason = reason,
             supplier = original.supplier,
             invoiceNumber = original.invoiceNumber,
             expenseCategory = original.expenseCategory,
             createdAt = System.currentTimeMillis(),
-            approvedAt = null,
             isPendingSync = false
         )
         dao.insertLedgerEntry(entity)
 
         dao.insertAuditLog(
             AuditLogEntity(
-                actorName = requester.fullName,
-                action = "REQUEST_CORRECTION",
+                actorName = syndic.fullName,
+                action = "RECORD_CORRECTION",
                 entityType = "TRANSACTION",
                 entityId = corrTxId,
-                details = "Demande de correction sur $originalTxId (Montant initial: ${original.amount} DZD, Nouveau: $newAmount DZD, Raison: $reason). En attente d'approbation du 2ème syndic.",
+                details = "Correction enregistrée par le syndic sur transaction originale $originalTxId (Delta: $correctionDelta DZD, Type: $correctionType, Raison: $reason). L'original reste préservé et immuable.",
                 timestamp = System.currentTimeMillis()
             )
         )
         return Result.success(corrTxId)
-    }
-
-    suspend fun approveCorrection(
-        corrTxId: String,
-        approver: User,
-        approve: Boolean,
-        rejectionReason: String? = null
-    ): Result<Unit> {
-        if (approver.role != UserRole.OWNER_SYNDIC) {
-            return Result.failure(IllegalStateException("Seul un syndic peut approuver une correction."))
-        }
-        val corrEntry = dao.getLedgerEntryById(corrTxId)
-            ?: return Result.failure(IllegalArgumentException("Demande de correction introuvable."))
-
-        if (corrEntry.creatorSyndicId == approver.id) {
-            return Result.failure(IllegalStateException("Règle de sécurité : Un syndic ne peut pas approuver sa propre demande de correction. L'approbation du second syndic est obligatoire."))
-        }
-
-        val updated = corrEntry.copy(
-            approverSyndicId = approver.id,
-            approverName = approver.fullName,
-            status = if (approve) "LOCKED" else "REJECTED",
-            correctionReason = if (!approve) rejectionReason else corrEntry.correctionReason,
-            approvedAt = if (approve) System.currentTimeMillis() else null
-        )
-        dao.updateLedgerEntry(updated)
-
-        dao.insertAuditLog(
-            AuditLogEntity(
-                actorName = approver.fullName,
-                action = if (approve) "APPROVE_CORRECTION" else "REJECT_CORRECTION",
-                entityType = "TRANSACTION",
-                entityId = corrTxId,
-                details = if (approve) "Correction approuvée et verrouillée. Transaction originale ${corrEntry.originalTxId} préservée dans l'historique immuable." else "Correction rejetée: $rejectionReason",
-                timestamp = System.currentTimeMillis()
-            )
-        )
-        return Result.success(Unit)
     }
 
     // --- Transparency Table for All 40 Apartments ---
@@ -1051,12 +914,8 @@ fun ProjectEntity.toProject(collected: Long) = Project(
     contributionPerApt = contributionPerApt,
     creatorSyndicId = creatorSyndicId,
     creatorName = creatorName,
-    approverSyndicId = approverSyndicId,
-    approverName = approverName,
     status = ProjectStatus.valueOf(status),
-    rejectionReason = rejectionReason,
     createdAt = createdAt,
-    approvedAt = approvedAt,
     totalCollected = collected
 )
 
@@ -1072,16 +931,14 @@ fun LedgerEntity.toFinancialLedgerEntry() = FinancialLedgerEntry(
     paymentMethod = PaymentMethod.valueOf(paymentMethod),
     creatorSyndicId = creatorSyndicId,
     creatorName = creatorName,
-    approverSyndicId = approverSyndicId,
-    approverName = approverName,
     status = TransactionStatus.valueOf(status),
+    isCorrection = isCorrection,
     originalTxId = originalTxId,
     correctionReason = correctionReason,
     supplier = supplier,
     invoiceNumber = invoiceNumber,
     expenseCategory = expenseCategory,
     createdAt = createdAt,
-    approvedAt = approvedAt,
     isPendingSync = isPendingSync
 )
 

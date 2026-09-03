@@ -39,9 +39,16 @@ fun FinanceScreen(
     var searchQuery by remember { mutableStateOf("") }
     var selectedFloorFilter by remember { mutableStateOf<Int?>(null) }
 
-    val totalContributionsCollected = lockedLedger.filter { it.type == TransactionType.OWNER_PAYMENT }.sumOf { it.amount }
-    val totalExpensesPaid = lockedLedger.filter { it.type == TransactionType.EXPENSE }.sumOf { it.amount }
-    val currentBalance = totalContributionsCollected - totalExpensesPaid
+    // OFFICIAL BALANCE FORMULA: Official Balance = SUM(CREDIT) - SUM(DEBIT)
+    // Only server-confirmed LOCKED transactions affect the official balance (PENDING_SYNC excluded).
+    val confirmedLocked = lockedLedger.filter { !it.isPendingSync && it.status == TransactionStatus.LOCKED }
+    val totalCredits = confirmedLocked.filter { 
+        it.type == TransactionType.OWNER_PAYMENT || it.type == TransactionType.CORRECTION_CREDIT 
+    }.sumOf { it.amount }
+    val totalDebits = confirmedLocked.filter { 
+        it.type == TransactionType.EXPENSE || it.type == TransactionType.CORRECTION_DEBIT 
+    }.sumOf { it.amount }
+    val officialBalance = totalCredits - totalDebits
 
     Column(
         modifier = Modifier
@@ -55,12 +62,12 @@ fun FinanceScreen(
         ) {
             Column(modifier = Modifier.padding(16.dp)) {
                 Text(
-                    text = Strings.treasuryBalance(appLanguage),
+                    text = if (appLanguage == AppLanguage.ARABIC) "الرصيد الرسمي المقفل (LOCKED)" else "Solde Officiel Verrouillé (LOCKED)",
                     style = MaterialTheme.typography.labelMedium,
                     color = MaterialTheme.colorScheme.onSurfaceVariant
                 )
                 Text(
-                    text = "$currentBalance DZD",
+                    text = "$officialBalance DZD",
                     style = MaterialTheme.typography.headlineMedium,
                     fontWeight = FontWeight.Bold,
                     color = MaterialTheme.colorScheme.primary
@@ -84,7 +91,7 @@ fun FinanceScreen(
                                 color = AtlasEmerald
                             )
                             Text(
-                                text = "+$totalContributionsCollected DZD",
+                                text = "+$totalCredits DZD",
                                 fontWeight = FontWeight.Bold,
                                 color = AtlasEmerald,
                                 fontSize = 14.sp
@@ -104,7 +111,7 @@ fun FinanceScreen(
                                 color = CoralRed
                             )
                             Text(
-                                text = "-$totalExpensesPaid DZD",
+                                text = "-$totalDebits DZD",
                                 fontWeight = FontWeight.Bold,
                                 color = CoralRed,
                                 fontSize = 14.sp
@@ -191,7 +198,7 @@ fun ProjectsTabContent(projects: List<Project>, appLanguage: AppLanguage) {
                             onClick = {},
                             label = { Text(project.status.name, fontSize = 11.sp) },
                             colors = AssistChipDefaults.assistChipColors(
-                                labelColor = if (project.status == ProjectStatus.APPROVED) AtlasEmerald else SandAmber
+                                labelColor = if (project.status == ProjectStatus.ACTIVE) AtlasEmerald else SandAmber
                             )
                         )
                     }
@@ -288,7 +295,7 @@ fun ProjectsTabContent(projects: List<Project>, appLanguage: AppLanguage) {
                     Spacer(modifier = Modifier.height(10.dp))
 
                     Text(
-                        text = "Créé par : ${project.creatorName} • Approuvé par : ${project.approverName ?: "En attente"}",
+                        text = "Créé et finalisé par le Syndic : ${project.creatorName}",
                         style = MaterialTheme.typography.labelSmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant
                     )
@@ -566,7 +573,7 @@ fun ExpensesTabContent(expenses: List<FinancialLedgerEntry>, appLanguage: AppLan
                             )
                             Spacer(modifier = Modifier.width(6.dp))
                             Text(
-                                text = "Verrouillé • Créé: ${exp.creatorName} • Approuvé: ${exp.approverName ?: "2ème Syndic"}",
+                                text = "Verrouillé (LOCKED) • Enregistré par: ${exp.creatorName}",
                                 fontSize = 11.sp,
                                 color = AtlasEmerald,
                                 fontWeight = FontWeight.Medium

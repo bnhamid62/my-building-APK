@@ -52,8 +52,21 @@ class BuildingViewModel(private val repository: BuildingRepository) : ViewModel(
     val lockedLedger: StateFlow<List<FinancialLedgerEntry>> = repository.getLockedLedgerFlow()
         .stateIn(viewModelScope, SharingStarted.Lazily, emptyList())
 
-    val pendingLedger: StateFlow<List<FinancialLedgerEntry>> = repository.getPendingApprovalLedgerFlow()
+    val pendingSyncLedger: StateFlow<List<FinancialLedgerEntry>> = repository.getPendingSyncLedgerFlow()
         .stateIn(viewModelScope, SharingStarted.Lazily, emptyList())
+
+    // OFFICIAL BALANCE FORMULA: Official Balance = SUM(CREDIT) - SUM(DEBIT)
+    // Only server-confirmed LOCKED transactions affect the official balance (PENDING_SYNC excluded).
+    val officialBalance: StateFlow<Long> = lockedLedger.map { entries ->
+        val confirmedLocked = entries.filter { !it.isPendingSync }
+        val credits = confirmedLocked.filter { 
+            it.type == TransactionType.OWNER_PAYMENT || it.type == TransactionType.CORRECTION_CREDIT 
+        }.sumOf { it.amount }
+        val debits = confirmedLocked.filter { 
+            it.type == TransactionType.EXPENSE || it.type == TransactionType.CORRECTION_DEBIT 
+        }.sumOf { it.amount }
+        credits - debits
+    }.stateIn(viewModelScope, SharingStarted.Lazily, 0L)
 
     val maintenanceReports: StateFlow<List<MaintenanceReport>> = repository.getAllMaintenanceFlow()
         .stateIn(viewModelScope, SharingStarted.Lazily, emptyList())
@@ -118,7 +131,7 @@ class BuildingViewModel(private val repository: BuildingRepository) : ViewModel(
 
     fun toggleSyndicMode() {
         val user = _currentUser.value ?: return
-        if (user.role == UserRole.OWNER_SYNDIC) {
+        if (user.role == UserRole.SYNDIC) {
             _isSyndicMode.value = !_isSyndicMode.value
         }
     }
@@ -129,7 +142,7 @@ class BuildingViewModel(private val repository: BuildingRepository) : ViewModel(
             val user = repository.login(username, password)
             if (user != null) {
                 _currentUser.value = user
-                _isSyndicMode.value = false // Default to Owner mode even for Syndic
+                _isSyndicMode.value = (user.role == UserRole.SYNDIC)
                 refreshTransparency()
                 success = true
             } else {
@@ -155,33 +168,16 @@ class BuildingViewModel(private val repository: BuildingRepository) : ViewModel(
         }
     }
 
-    // --- Financial Operations ---
+    // --- Financial Operations (Single-Syndic Direct Finalization) ---
     fun createProject(title: String, description: String, totalCost: Long) {
         val user = _currentUser.value ?: return
         viewModelScope.launch {
             val result = repository.createFinancialProject(title, description, totalCost, user)
             result.onSuccess {
                 _snackMessage.value = if (_appLanguage.value == AppLanguage.ARABIC)
-                    "تم إنشاء المشروع! في انتظار موافقة الوكيل الثاني."
+                    "تم إنشاء وتفعيل المشروع بنجاح بواسطة الوكيل."
                 else
-                    "Projet créé ! En attente d'approbation du 2ème syndic."
-            }.onFailure {
-                _snackMessage.value = it.message
-            }
-        }
-    }
-
-    fun approveProject(projectId: String, approve: Boolean, reason: String? = null) {
-        val user = _currentUser.value ?: return
-        viewModelScope.launch {
-            val result = repository.approveFinancialProject(projectId, user, approve, reason)
-            result.onSuccess {
-                refreshTransparency()
-                _snackMessage.value = if (approve) {
-                    if (_appLanguage.value == AppLanguage.ARABIC) "تمت الموافقة على المشروع بنجاح من الوكيل الثاني." else "Projet approuvé par le second syndic."
-                } else {
-                    if (_appLanguage.value == AppLanguage.ARABIC) "تم رفض المشروع." else "Projet rejeté."
-                }
+                    "Projet créé et activé par le syndic."
             }.onFailure {
                 _snackMessage.value = it.message
             }
@@ -206,7 +202,7 @@ class BuildingViewModel(private val repository: BuildingRepository) : ViewModel(
             result.onSuccess { txId ->
                 refreshTransparency()
                 _snackMessage.value = if (_appLanguage.value == AppLanguage.ARABIC)
-                    "تم تسجيل الدفعة بنجاح ورقمها ($txId). المعاملة مقفلة في السجل المالي."
+                    "تم تسجيل الدفعة بنجاح ($txId). المعاملة مقفلة في السجل المالي."
                 else
                     "Paiement enregistré ($txId) et verrouillé dans le registre immuable."
             }.onFailure {
@@ -231,60 +227,32 @@ class BuildingViewModel(private val repository: BuildingRepository) : ViewModel(
                 projectId, projectTitle, category, description,
                 amount, supplier, invoiceNumber, paymentMethod, user
             )
-            result.onSuccess {
+            result.onSuccess { txId ->
                 _snackMessage.value = if (_appLanguage.value == AppLanguage.ARABIC)
-                    "تم إنشاء المصروف! في انتظار موافقة الوكيل الثاني."
+                    "تم تسجيل المصروف بنجاح ($txId). المعاملة مقفلة في السجل المالي."
                 else
-                    "Dépense créée ! En attente d'approbation du 2ème syndic."
+                    "Dépense enregistrée ($txId) et verrouillée dans le registre."
             }.onFailure {
                 _snackMessage.value = it.message
             }
         }
     }
 
-    fun approveExpense(txId: String, approve: Boolean, reason: String? = null) {
+    fun recordFinancialCorrection(
+        originalTxId: String,
+        delta: Long,
+        isDebit: Boolean,
+        reason: String
+    ) {
         val user = _currentUser.value ?: return
         viewModelScope.launch {
-            val result = repository.approveExpense(txId, user, approve, reason)
-            result.onSuccess {
+            val result = repository.recordFinancialCorrection(originalTxId, delta, isDebit, reason, user)
+            result.onSuccess { corrTxId ->
                 refreshTransparency()
-                _snackMessage.value = if (approve) {
-                    if (_appLanguage.value == AppLanguage.ARABIC) "تمت الموافقة وقفل المصروف في السجل المالي." else "Dépense approuvée et verrouillée dans le registre."
-                } else {
-                    if (_appLanguage.value == AppLanguage.ARABIC) "تم رفض المصروف." else "Dépense rejetée."
-                }
-            }.onFailure {
-                _snackMessage.value = it.message
-            }
-        }
-    }
-
-    fun requestFinancialCorrection(originalTxId: String, newAmount: Long, reason: String) {
-        val user = _currentUser.value ?: return
-        viewModelScope.launch {
-            val result = repository.requestFinancialCorrection(originalTxId, newAmount, reason, user)
-            result.onSuccess {
                 _snackMessage.value = if (_appLanguage.value == AppLanguage.ARABIC)
-                    "تم إرسال طلب التصحيح! المعاملة الأصلية محفوظة، وتنتظر موافقة الوكيل الثاني."
+                    "تم تسجيل التصحيح المالي ($corrTxId). المعاملة الأصلية محفوظة بدون تعديل."
                 else
-                    "Demande de correction transmise ! L'original reste inchangé, approbation du 2ème syndic requise."
-            }.onFailure {
-                _snackMessage.value = it.message
-            }
-        }
-    }
-
-    fun approveCorrection(corrTxId: String, approve: Boolean, reason: String? = null) {
-        val user = _currentUser.value ?: return
-        viewModelScope.launch {
-            val result = repository.approveCorrection(corrTxId, user, approve, reason)
-            result.onSuccess {
-                refreshTransparency()
-                _snackMessage.value = if (approve) {
-                    if (_appLanguage.value == AppLanguage.ARABIC) "تم اعتماد التصحيح المالي مع الحفاظ على السجل الأصلي." else "Correction validée avec préservation de l'enregistrement initial."
-                } else {
-                    if (_appLanguage.value == AppLanguage.ARABIC) "تم رفض التصحيح." else "Correction rejetée."
-                }
+                    "Correction enregistrée ($corrTxId). La transaction originale reste préservée et immuable."
             }.onFailure {
                 _snackMessage.value = it.message
             }
